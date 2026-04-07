@@ -1,0 +1,59 @@
+# Docker Stack file for HAProxy.
+# Deployed via CI with: docker stack deploy --compose-file haproxy-stack.yml ${SWARM_STACK}
+#
+# HAProxy is ONLY on db-internal (the private overlay network).
+# It reaches Patroni nodes for health-checks and routes SQL connections
+# to the current primary. The counter app also joins db-internal
+# (via --network db-internal in docker compose) so it can reach HAProxy.
+#
+# WHY two pinned services instead of replicas=2?
+# With replicas=2, Swarm might place both on the same server (if one server is
+# the most available). We need exactly one HAProxy per app server.
+# Pinning with placement constraints guarantees one per server.
+#
+# WHY Swarm configs for haproxy.cfg?
+# Swarm configs distribute a file to containers without mounting host paths.
+# The CI copies haproxy.cfg to the manager, then stack deploy distributes it.
+
+version: "3.8"
+
+services:
+  haproxy-rishi-1:
+    image: haproxy:2.8-alpine
+    configs:
+      - source: haproxy_cfg
+        target: /usr/local/etc/haproxy/haproxy.cfg
+    networks:
+      - db-internal
+    deploy:
+      placement:
+        constraints:
+          - node.labels.server == rishi-1
+      restart_policy:
+        condition: any
+
+  haproxy-rishi-2:
+    image: haproxy:2.8-alpine
+    configs:
+      - source: haproxy_cfg
+        target: /usr/local/etc/haproxy/haproxy.cfg
+    networks:
+      - db-internal
+    deploy:
+      placement:
+        constraints:
+          - node.labels.server == rishi-2
+      restart_policy:
+        condition: any
+
+configs:
+  haproxy_cfg:
+    file: ./haproxy.cfg
+
+networks:
+  # Same definition as in etcd/stack.yml and patroni/stack.yml — they
+  # are merged into one stack so all definitions must agree.
+  db-internal:
+    driver: overlay
+    attachable: true
+    name: ${OVERLAY_NETWORK}

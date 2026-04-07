@@ -1,0 +1,52 @@
+# Counter app — runs on rishi-1 and rishi-2 via plain docker-compose (not Swarm).
+# Also runs locally via local/docker-compose.yml.
+#
+# All ${VAR} interpolations come from the SHELL ENV. The deploy script and
+# local/setup.sh both `set -a; source project.config; set +a` before running
+# `docker compose up`. Compose v2 also reads .env files automatically, but
+# we use the explicit shell-env path so the same project.config drives both
+# stack files (Swarm) and compose files (regular).
+#
+# WHY a secret file for DATABASE_URL?
+# DATABASE_URL contains the postgres password. Env vars are visible in
+# `docker inspect`. Mounting it as a file in /run/secrets/ keeps it out of
+# inspect output. CI writes ./secrets/database_url before running compose up.
+
+services:
+  app:
+    image: ${IMAGE_REPO}:${IMAGE_TAG:-latest}
+    container_name: ${PROJECT_REPO}
+    restart: unless-stopped
+    expose:
+      - "8000"
+    networks:
+      - web
+      - db-internal
+    environment:
+      # SENTRY_DSN is not a critical secret (it only allows sending events,
+      # not reading them) so an env var is acceptable.
+      SENTRY_DSN: ${SENTRY_DSN:-}
+      # Tag every Sentry event with the git SHA so errors are correlated to
+      # specific deploys. CI sets IMAGE_TAG=${{ github.sha }}.
+      SENTRY_RELEASE: ${IMAGE_TAG:-unknown}
+      SENTRY_ENVIRONMENT: production
+    secrets:
+      - database_url
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+secrets:
+  # CI writes ./secrets/database_url with the server-specific connection string
+  # (haproxy-rishi-1 vs haproxy-rishi-2) before docker compose up.
+  database_url:
+    file: ./secrets/database_url
+
+networks:
+  web:
+    external: true
+  db-internal:
+    external: true
+    name: ${OVERLAY_NETWORK}

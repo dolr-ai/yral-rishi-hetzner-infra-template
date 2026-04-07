@@ -1,0 +1,72 @@
+# Patroni configuration — uses environment variables for service-specific values.
+# WHY env vars? The same stack.yml deploys to all 3 servers via Swarm placement.
+# Each node needs a different name and service address. We pass those as env vars.
+#
+# IMPORTANT: Patroni does NOT do `${VAR}` substitution in this YAML file.
+# It DOES respect `PATRONI_<KEY>` env vars that override YAML values. The
+# `scope:` and `name:` lines below are placeholders — the real values come
+# from PATRONI_SCOPE and PATRONI_NAME env vars set in patroni/stack.yml,
+# which in turn read from project.config.
+
+scope: PLACEHOLDER_OVERRIDDEN_BY_PATRONI_SCOPE_ENV
+name: PLACEHOLDER_OVERRIDDEN_BY_PATRONI_NAME_ENV
+
+# REST API — Patroni exposes a status endpoint that HAProxy uses for health checks
+# GET /master → 200 if this node is primary, 503 if not
+restapi:
+  listen: 0.0.0.0:8008
+  # connect_address is set via PATRONI_RESTAPI_CONNECT_ADDRESS env var
+  # in each service's stack.yml entry (e.g., patroni-rishi-1:8008).
+  # Patroni's native env var convention: PATRONI_<SECTION>_<KEY> overrides YAML.
+
+# Where Patroni stores cluster state — the etcd cluster
+# etcd service names resolve on the db-internal overlay network.
+etcd3:
+  hosts: etcd-rishi-1:2379,etcd-rishi-2:2379,etcd-rishi-3:2379
+
+# Bootstrap: runs ONCE on the first node to initialize the cluster
+bootstrap:
+  dcs:
+    ttl: 30                        # seconds a leader lease is valid
+    loop_wait: 10                  # seconds between Patroni health checks
+    retry_timeout: 10              # seconds to wait before retrying
+    maximum_lag_on_failover: 1048576  # 1MB: don't promote a node that's too far behind
+    postgresql:
+      use_pg_rewind: true          # allows a former primary to re-join as standby
+      parameters:
+        wal_level: replica
+        hot_standby: "on"
+        max_wal_senders: 10
+        max_replication_slots: 10
+  initdb:
+    - encoding: UTF8
+    - data-checksums
+  # post_init runs ONCE after the very first cluster bootstrap on the primary.
+  # It creates the database (name comes from POSTGRES_DB env var) and the
+  # business-logic schema (patroni/init.sql). Standbys get this data
+  # automatically via replication — they don't run this script.
+  post_init: /scripts/post_init.sh
+  pg_hba:
+    # Allow replication from any IP on the db-internal overlay (overlay is private — safe)
+    - host replication replicator 0.0.0.0/0 md5
+    - host all all 0.0.0.0/0 md5
+
+# PostgreSQL configuration
+postgresql:
+  listen: 0.0.0.0:5432
+  # connect_address is set via PATRONI_POSTGRESQL_CONNECT_ADDRESS env var
+  # in each service's stack.yml entry (e.g., patroni-rishi-1:5432).
+  data_dir: /data/patroni
+  pgpass: /tmp/.pgpass               # file to store passwords for pg_rewind
+  # Authentication is configured via Patroni's native env vars in stack.yml:
+  #   PATRONI_REPLICATION_USERNAME / PATRONI_REPLICATION_PASSWORD
+  #   PATRONI_SUPERUSER_USERNAME / PATRONI_SUPERUSER_PASSWORD
+  #   PATRONI_REWIND_USERNAME / PATRONI_REWIND_PASSWORD
+  # YAML ${VAR} interpolation is NOT supported by Patroni — must use env vars.
+  parameters:
+    unix_socket_directories: '.'
+    max_connections: 100
+
+tags:
+  nofailover: false
+  noloadbalance: false

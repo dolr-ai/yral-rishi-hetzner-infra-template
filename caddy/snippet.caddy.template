@@ -1,0 +1,17 @@
+# This is a TEMPLATE rendered at deploy time by scripts/ci/deploy-app.sh
+# (and by local/setup.sh for local dev — but local doesn't use Caddy at all).
+#
+# At deploy time, ${PROJECT_DOMAIN} and ${PROJECT_REPO} are sed-substituted
+# from project.config, then the rendered file is written to:
+#   /home/deploy/caddy/conf.d/${PROJECT_REPO}.caddy
+#
+# Caddy on the server has a wrapper /home/deploy/caddy/Caddyfile that just
+# does `import /etc/caddy/conf.d/*.caddy`, so this snippet gets picked up
+# automatically by `caddy reload`.
+#
+# Each project owns ONLY its own snippet file. Never reads or modifies
+# any other project's file. Zero coupling between projects at the Caddy layer.
+${PROJECT_DOMAIN} {
+    tls internal
+    reverse_proxy ${PROJECT_REPO}:8000
+}

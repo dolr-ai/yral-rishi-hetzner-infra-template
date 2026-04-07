@@ -1,0 +1,228 @@
+# Local single-host equivalent of the production Docker Swarm stack.
+#
+# WHY this exists:
+# Production runs across 3 servers using Docker Swarm overlay networks,
+# placement constraints, and external secrets. None of that works on a
+# single laptop. This file flattens the same architecture into one
+# docker-compose that runs the FULL stack on your Mac:
+#   - 3 etcd nodes
+#   - 3 Patroni + PostgreSQL nodes
+#   - 1 HAProxy
+#   - 1 FastAPI app
+#
+# WHY container names match production exactly?
+# patroni.yml references "etcd-rishi-1/2/3" as etcd hosts.
+# haproxy.cfg references "patroni-rishi-1/2/3" as backends.
+# By naming the local containers identically, the production configs
+# work locally with ZERO modification — same image, same configs.
+#
+# WHY no Caddy locally?
+# Caddy + Cloudflare + tls internal exists for the production HTTPS path.
+# Locally we just expose the FastAPI app on http://localhost:8080.
+#
+# Usage:
+#   bash local/setup.sh        # generate secrets + start everything
+#   curl http://localhost:8080 # test
+#   bash local/teardown.sh     # stop and wipe data
+
+services:
+  # ==========================================================================
+  # etcd cluster (3 nodes — same architecture as production)
+  # ==========================================================================
+  etcd-rishi-1:
+    image: quay.io/coreos/etcd:v3.5.16
+    container_name: etcd-rishi-1
+    environment:
+      ETCD_NAME: rishi-1
+      ETCD_DATA_DIR: /etcd-data
+      ETCD_LISTEN_CLIENT_URLS: http://0.0.0.0:2379
+      ETCD_LISTEN_PEER_URLS: http://0.0.0.0:2380
+      ETCD_ADVERTISE_CLIENT_URLS: http://etcd-rishi-1:2379
+      ETCD_INITIAL_ADVERTISE_PEER_URLS: http://etcd-rishi-1:2380
+      ETCD_INITIAL_CLUSTER: "rishi-1=http://etcd-rishi-1:2380,rishi-2=http://etcd-rishi-2:2380,rishi-3=http://etcd-rishi-3:2380"
+      ETCD_INITIAL_CLUSTER_STATE: new
+      ETCD_INITIAL_CLUSTER_TOKEN: ${ETCD_TOKEN}
+    volumes:
+      - etcd-rishi-1-data:/etcd-data
+    networks:
+      - local-net
+
+  etcd-rishi-2:
+    image: quay.io/coreos/etcd:v3.5.16
+    container_name: etcd-rishi-2
+    environment:
+      ETCD_NAME: rishi-2
+      ETCD_DATA_DIR: /etcd-data
+      ETCD_LISTEN_CLIENT_URLS: http://0.0.0.0:2379
+      ETCD_LISTEN_PEER_URLS: http://0.0.0.0:2380
+      ETCD_ADVERTISE_CLIENT_URLS: http://etcd-rishi-2:2379
+      ETCD_INITIAL_ADVERTISE_PEER_URLS: http://etcd-rishi-2:2380
+      ETCD_INITIAL_CLUSTER: "rishi-1=http://etcd-rishi-1:2380,rishi-2=http://etcd-rishi-2:2380,rishi-3=http://etcd-rishi-3:2380"
+      ETCD_INITIAL_CLUSTER_STATE: new
+      ETCD_INITIAL_CLUSTER_TOKEN: ${ETCD_TOKEN}
+    volumes:
+      - etcd-rishi-2-data:/etcd-data
+    networks:
+      - local-net
+
+  etcd-rishi-3:
+    image: quay.io/coreos/etcd:v3.5.16
+    container_name: etcd-rishi-3
+    environment:
+      ETCD_NAME: rishi-3
+      ETCD_DATA_DIR: /etcd-data
+      ETCD_LISTEN_CLIENT_URLS: http://0.0.0.0:2379
+      ETCD_LISTEN_PEER_URLS: http://0.0.0.0:2380
+      ETCD_ADVERTISE_CLIENT_URLS: http://etcd-rishi-3:2379
+      ETCD_INITIAL_ADVERTISE_PEER_URLS: http://etcd-rishi-3:2380
+      ETCD_INITIAL_CLUSTER: "rishi-1=http://etcd-rishi-1:2380,rishi-2=http://etcd-rishi-2:2380,rishi-3=http://etcd-rishi-3:2380"
+      ETCD_INITIAL_CLUSTER_STATE: new
+      ETCD_INITIAL_CLUSTER_TOKEN: ${ETCD_TOKEN}
+    volumes:
+      - etcd-rishi-3-data:/etcd-data
+    networks:
+      - local-net
+
+  # ==========================================================================
+  # Patroni + PostgreSQL cluster (3 nodes)
+  # Built from the SAME Dockerfile as production. The image bakes in
+  # patroni.yml, post_init.sh, init.sql, and entrypoint.sh — exactly what
+  # runs in production.
+  # ==========================================================================
+  patroni-rishi-1:
+    image: ${PATRONI_IMAGE_REPO}:local
+    container_name: patroni-rishi-1
+    environment:
+      PATRONI_NAME: rishi-1
+      PATRONI_SCOPE: ${PATRONI_SCOPE}
+      PATRONI_RESTAPI_CONNECT_ADDRESS: "patroni-rishi-1:8008"
+      PATRONI_POSTGRESQL_CONNECT_ADDRESS: "patroni-rishi-1:5432"
+      PATRONI_SUPERUSER_USERNAME: postgres
+      PATRONI_REPLICATION_USERNAME: replicator
+      PATRONI_REWIND_USERNAME: rewind_user
+      POSTGRES_DB: ${POSTGRES_DB}
+    secrets:
+      - postgres_password
+      - replication_password
+    volumes:
+      - patroni-rishi-1-data:/data/patroni
+    networks:
+      - local-net
+    depends_on:
+      - etcd-rishi-1
+      - etcd-rishi-2
+      - etcd-rishi-3
+    restart: unless-stopped
+
+  patroni-rishi-2:
+    image: ${PATRONI_IMAGE_REPO}:local
+    container_name: patroni-rishi-2
+    environment:
+      PATRONI_NAME: rishi-2
+      PATRONI_SCOPE: ${PATRONI_SCOPE}
+      PATRONI_RESTAPI_CONNECT_ADDRESS: "patroni-rishi-2:8008"
+      PATRONI_POSTGRESQL_CONNECT_ADDRESS: "patroni-rishi-2:5432"
+      PATRONI_SUPERUSER_USERNAME: postgres
+      PATRONI_REPLICATION_USERNAME: replicator
+      PATRONI_REWIND_USERNAME: rewind_user
+      POSTGRES_DB: ${POSTGRES_DB}
+    secrets:
+      - postgres_password
+      - replication_password
+    volumes:
+      - patroni-rishi-2-data:/data/patroni
+    networks:
+      - local-net
+    depends_on:
+      - etcd-rishi-1
+      - etcd-rishi-2
+      - etcd-rishi-3
+    restart: unless-stopped
+
+  patroni-rishi-3:
+    image: ${PATRONI_IMAGE_REPO}:local
+    container_name: patroni-rishi-3
+    environment:
+      PATRONI_NAME: rishi-3
+      PATRONI_SCOPE: ${PATRONI_SCOPE}
+      PATRONI_RESTAPI_CONNECT_ADDRESS: "patroni-rishi-3:8008"
+      PATRONI_POSTGRESQL_CONNECT_ADDRESS: "patroni-rishi-3:5432"
+      PATRONI_SUPERUSER_USERNAME: postgres
+      PATRONI_REPLICATION_USERNAME: replicator
+      PATRONI_REWIND_USERNAME: rewind_user
+      POSTGRES_DB: ${POSTGRES_DB}
+    secrets:
+      - postgres_password
+      - replication_password
+    volumes:
+      - patroni-rishi-3-data:/data/patroni
+    networks:
+      - local-net
+    depends_on:
+      - etcd-rishi-1
+      - etcd-rishi-2
+      - etcd-rishi-3
+    restart: unless-stopped
+
+  # ==========================================================================
+  # HAProxy — bind-mounts the production haproxy.cfg unchanged.
+  # The cfg references patroni-rishi-1/2/3 by hostname; container names
+  # match so Docker DNS (127.0.0.11) resolves them correctly.
+  # ==========================================================================
+  haproxy:
+    image: haproxy:2.8-alpine
+    container_name: haproxy
+    volumes:
+      - ../haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    networks:
+      - local-net
+    depends_on:
+      - patroni-rishi-1
+      - patroni-rishi-2
+      - patroni-rishi-3
+    restart: unless-stopped
+
+  # ==========================================================================
+  # FastAPI counter app — built from the production Dockerfile.
+  # Reads DATABASE_URL from /run/secrets/database_url (same as production).
+  # ==========================================================================
+  app:
+    image: ${IMAGE_REPO}:local
+    container_name: ${PROJECT_REPO}
+    ports:
+      - "8080:8000"
+    environment:
+      SENTRY_DSN: ""
+      SENTRY_RELEASE: local-dev
+      SENTRY_ENVIRONMENT: local
+    secrets:
+      - database_url
+    networks:
+      - local-net
+    depends_on:
+      - haproxy
+    restart: unless-stopped
+
+# Compose secrets — files mounted at /run/secrets/<name>, same path as
+# Docker Swarm secrets in production. The app and Patroni containers
+# read from the same paths regardless of which environment they're in.
+secrets:
+  postgres_password:
+    file: ./secrets/postgres_password
+  replication_password:
+    file: ./secrets/replication_password
+  database_url:
+    file: ./secrets/database_url
+
+networks:
+  local-net:
+    driver: bridge
+    name: ${PROJECT_NAME}-local-net
+
+volumes:
+  etcd-rishi-1-data:
+  etcd-rishi-2-data:
+  etcd-rishi-3-data:
+  patroni-rishi-1-data:
+  patroni-rishi-2-data:
+  patroni-rishi-3-data:

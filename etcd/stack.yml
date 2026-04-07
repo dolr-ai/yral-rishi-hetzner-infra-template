@@ -1,0 +1,133 @@
+# Docker Stack file for the etcd cluster.
+# Deployed via CI with: docker stack deploy --compose-file etcd-stack.yml ${SWARM_STACK}
+#
+# All ${VAR} interpolations come from the SHELL ENV of the calling process.
+# scripts/ci/deploy-db-stack.sh sources project.config with `set -a` BEFORE
+# calling docker stack deploy, which makes every line in project.config
+# automatically available to docker compose's interpolation engine.
+#
+# WHY a stack file instead of docker-compose?
+# Docker Swarm's "stack" is the multi-server equivalent of docker-compose.
+# Stack files support two things compose files don't:
+#   1. "deploy.placement.constraints" — pin a container to a specific server
+#   2. Overlay networks — private encrypted networking across servers
+#
+# WHY 3 separate services (etcd-rishi-1, etcd-rishi-2, etcd-rishi-3)?
+# etcd is a cluster where each node has its own identity and data directory.
+# Each node must run on its own server. We use placement constraints to
+# enforce this: "etcd-rishi-1 MUST run on the node labeled server=rishi-1."
+#
+# WHY no "ports:" here?
+# etcd is only on the db-internal overlay network — invisible to the internet.
+# Only other containers on db-internal (Patroni, HAProxy) can reach it.
+# This is the whole point of the overlay: no UFW rules, no public exposure.
+
+version: "3.8"
+
+services:
+  etcd-rishi-1:
+    image: quay.io/coreos/etcd:v3.5.16
+    environment:
+      ETCD_NAME: rishi-1
+      ETCD_DATA_DIR: /etcd-data
+      # LISTEN on all interfaces inside the container
+      ETCD_LISTEN_CLIENT_URLS: http://0.0.0.0:2379
+      ETCD_LISTEN_PEER_URLS: http://0.0.0.0:2380
+      # ADVERTISE using service name — Swarm DNS resolves "etcd-rishi-1" to
+      # this container's overlay IP. Other etcd nodes use this to find each other.
+      ETCD_ADVERTISE_CLIENT_URLS: http://etcd-rishi-1:2379
+      ETCD_INITIAL_ADVERTISE_PEER_URLS: http://etcd-rishi-1:2380
+      ETCD_INITIAL_CLUSTER: "rishi-1=http://etcd-rishi-1:2380,rishi-2=http://etcd-rishi-2:2380,rishi-3=http://etcd-rishi-3:2380"
+      ETCD_INITIAL_CLUSTER_STATE: new
+      ETCD_INITIAL_CLUSTER_TOKEN: ${ETCD_TOKEN}
+    volumes:
+      - etcd-rishi-1-data:/etcd-data
+    networks:
+      - db-internal
+    deploy:
+      placement:
+        constraints:
+          - node.labels.server == rishi-1
+      restart_policy:
+        condition: any
+      # Rolling update — same reasoning as Patroni: etcd needs quorum 2/3
+      update_config:
+        parallelism: 1
+        delay: 30s
+        order: stop-first
+        failure_action: rollback
+
+  etcd-rishi-2:
+    image: quay.io/coreos/etcd:v3.5.16
+    environment:
+      ETCD_NAME: rishi-2
+      ETCD_DATA_DIR: /etcd-data
+      ETCD_LISTEN_CLIENT_URLS: http://0.0.0.0:2379
+      ETCD_LISTEN_PEER_URLS: http://0.0.0.0:2380
+      ETCD_ADVERTISE_CLIENT_URLS: http://etcd-rishi-2:2379
+      ETCD_INITIAL_ADVERTISE_PEER_URLS: http://etcd-rishi-2:2380
+      ETCD_INITIAL_CLUSTER: "rishi-1=http://etcd-rishi-1:2380,rishi-2=http://etcd-rishi-2:2380,rishi-3=http://etcd-rishi-3:2380"
+      ETCD_INITIAL_CLUSTER_STATE: new
+      ETCD_INITIAL_CLUSTER_TOKEN: ${ETCD_TOKEN}
+    volumes:
+      - etcd-rishi-2-data:/etcd-data
+    networks:
+      - db-internal
+    deploy:
+      placement:
+        constraints:
+          - node.labels.server == rishi-2
+      restart_policy:
+        condition: any
+      update_config:
+        parallelism: 1
+        delay: 30s
+        order: stop-first
+        failure_action: rollback
+
+  etcd-rishi-3:
+    image: quay.io/coreos/etcd:v3.5.16
+    environment:
+      ETCD_NAME: rishi-3
+      ETCD_DATA_DIR: /etcd-data
+      ETCD_LISTEN_CLIENT_URLS: http://0.0.0.0:2379
+      ETCD_LISTEN_PEER_URLS: http://0.0.0.0:2380
+      ETCD_ADVERTISE_CLIENT_URLS: http://etcd-rishi-3:2379
+      ETCD_INITIAL_ADVERTISE_PEER_URLS: http://etcd-rishi-3:2380
+      ETCD_INITIAL_CLUSTER: "rishi-1=http://etcd-rishi-1:2380,rishi-2=http://etcd-rishi-2:2380,rishi-3=http://etcd-rishi-3:2380"
+      ETCD_INITIAL_CLUSTER_STATE: new
+      ETCD_INITIAL_CLUSTER_TOKEN: ${ETCD_TOKEN}
+    volumes:
+      - etcd-rishi-3-data:/etcd-data
+    networks:
+      - db-internal
+    deploy:
+      placement:
+        constraints:
+          - node.labels.server == rishi-3
+      restart_policy:
+        condition: any
+      update_config:
+        parallelism: 1
+        delay: 30s
+        order: stop-first
+        failure_action: rollback
+
+networks:
+  # Per-project overlay network — created and managed BY THIS STACK.
+  # WHY per-project instead of a shared network?
+  # Multiple stacks on the same overlay network can have DNS resolution
+  # conflicts when they share short service names like "etcd-rishi-1".
+  # Per-project networks isolate them completely. The `name:` field is
+  # the actual Docker network name (the YAML key `db-internal` is just
+  # this file's local reference). The app's docker-compose.yml uses
+  # the same `name:` to attach to it.
+  db-internal:
+    driver: overlay
+    attachable: true
+    name: ${OVERLAY_NETWORK}
+
+volumes:
+  etcd-rishi-1-data:
+  etcd-rishi-2-data:
+  etcd-rishi-3-data:

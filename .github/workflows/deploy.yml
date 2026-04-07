@@ -1,0 +1,218 @@
+name: Build and Deploy
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  # ============================================================================
+  # JOB 1: Load project.config + build images and push to GHCR.
+  # Tagged with both :latest (alias) and :${git-sha} (immutable).
+  # ============================================================================
+  build-and-push:
+    name: Build and push Docker images
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Load project.config into job env
+        # Parses every KEY=value line into $GITHUB_ENV so subsequent steps
+        # can use ${{ env.PROJECT_NAME }}, ${{ env.IMAGE_REPO }}, etc.
+        run: |
+          grep -v '^#' project.config | grep -v '^$' >> $GITHUB_ENV
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push app image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE_REPO }}:latest
+            ${{ env.IMAGE_REPO }}:${{ github.sha }}
+
+      - name: Build and push Patroni image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./patroni
+          push: true
+          tags: |
+            ${{ env.PATRONI_IMAGE_REPO }}:latest
+            ${{ env.PATRONI_IMAGE_REPO }}:${{ github.sha }}
+
+  # ============================================================================
+  # JOB 2: Deploy etcd + Patroni + HAProxy as the project's Swarm stack.
+  # Pre-pulls the Patroni image on each server (private GHCR auth issue).
+  # ============================================================================
+  deploy-db-stack:
+    name: Deploy etcd + Patroni + HAProxy (Swarm stack)
+    runs-on: ubuntu-latest
+    needs: build-and-push
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Load project.config into job env
+        run: |
+          grep -v '^#' project.config | grep -v '^$' >> $GITHUB_ENV
+
+      - name: Copy stack files + project.config + CI script to Swarm manager (rishi-1)
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SERVER_1_IP }}
+          username: deploy
+          key: ${{ secrets.HETZNER_BARE_METAL_GITHUB_ACTIONS_SSH_PRIVATE_KEY }}
+          source: "etcd/stack.yml,patroni/stack.yml,haproxy/stack.yml,haproxy/haproxy.cfg,scripts/ci/deploy-db-stack.sh,project.config"
+          target: /home/deploy/${{ env.SWARM_STACK }}-stack
+
+      - name: Pre-pull Patroni image on Server 1
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.SERVER_1_IP }}
+          username: deploy
+          key: ${{ secrets.HETZNER_BARE_METAL_GITHUB_ACTIONS_SSH_PRIVATE_KEY }}
+          script: |
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+            docker pull ${{ env.PATRONI_IMAGE_REPO }}:${{ github.sha }}
+
+      - name: Pre-pull Patroni image on Server 2
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.SERVER_2_IP }}
+          username: deploy
+          key: ${{ secrets.HETZNER_BARE_METAL_GITHUB_ACTIONS_SSH_PRIVATE_KEY }}
+          script: |
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+            docker pull ${{ env.PATRONI_IMAGE_REPO }}:${{ github.sha }}
+
+      - name: Pre-pull Patroni image on Server 3
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.SERVER_3_IP }}
+          username: deploy
+          key: ${{ secrets.HETZNER_BARE_METAL_GITHUB_ACTIONS_SSH_PRIVATE_KEY }}
+          script: |
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+            docker pull ${{ env.PATRONI_IMAGE_REPO }}:${{ github.sha }}
+
+      - name: Deploy stack via Swarm manager
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.SERVER_1_IP }}
+          username: deploy
+          key: ${{ secrets.HETZNER_BARE_METAL_GITHUB_ACTIONS_SSH_PRIVATE_KEY }}
+          envs: IMAGE_TAG,POSTGRES_PASSWORD,REPLICATION_PASSWORD,GITHUB_TOKEN,GITHUB_ACTOR,STACK_DIR
+          script: |
+            chmod +x ${STACK_DIR}/scripts/ci/deploy-db-stack.sh
+            ${STACK_DIR}/scripts/ci/deploy-db-stack.sh
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          REPLICATION_PASSWORD: ${{ secrets.REPLICATION_PASSWORD }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_ACTOR: ${{ github.actor }}
+          STACK_DIR: /home/deploy/${{ env.SWARM_STACK }}-stack
+
+  # ============================================================================
+  # JOB 3: Deploy app + Caddy snippet to rishi-1 and rishi-2.
+  # ============================================================================
+  deploy-app:
+    name: Deploy app + Caddy snippet to rishi-1 and rishi-2
+    runs-on: ubuntu-latest
+    needs: deploy-db-stack
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Load project.config into job env
+        run: |
+          grep -v '^#' project.config | grep -v '^$' >> $GITHUB_ENV
+
+      # ---------- SERVER 1 ----------
+      - name: Copy app files + project.config + CI script to Server 1
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SERVER_1_IP }}
+          username: deploy
+          key: ${{ secrets.HETZNER_BARE_METAL_GITHUB_ACTIONS_SSH_PRIVATE_KEY }}
+          source: "docker-compose.yml,caddy/snippet.caddy.template,scripts/ci/deploy-app.sh,project.config"
+          target: /home/deploy/${{ env.PROJECT_REPO }}
+
+      - name: Deploy app + Caddy snippet on Server 1
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.SERVER_1_IP }}
+          username: deploy
+          key: ${{ secrets.HETZNER_BARE_METAL_GITHUB_ACTIONS_SSH_PRIVATE_KEY }}
+          envs: IMAGE_TAG,DATABASE_URL,SENTRY_DSN,GITHUB_TOKEN,GITHUB_ACTOR,APP_DIR
+          script: |
+            chmod +x ${APP_DIR}/scripts/ci/deploy-app.sh
+            ${APP_DIR}/scripts/ci/deploy-app.sh
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL_SERVER_1 }}
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_ACTOR: ${{ github.actor }}
+          APP_DIR: /home/deploy/${{ env.PROJECT_REPO }}
+
+      # ---------- SERVER 2 ----------
+      - name: Copy app files + project.config + CI script to Server 2
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SERVER_2_IP }}
+          username: deploy
+          key: ${{ secrets.HETZNER_BARE_METAL_GITHUB_ACTIONS_SSH_PRIVATE_KEY }}
+          source: "docker-compose.yml,caddy/snippet.caddy.template,scripts/ci/deploy-app.sh,project.config"
+          target: /home/deploy/${{ env.PROJECT_REPO }}
+
+      - name: Deploy app + Caddy snippet on Server 2
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.SERVER_2_IP }}
+          username: deploy
+          key: ${{ secrets.HETZNER_BARE_METAL_GITHUB_ACTIONS_SSH_PRIVATE_KEY }}
+          envs: IMAGE_TAG,DATABASE_URL,SENTRY_DSN,GITHUB_TOKEN,GITHUB_ACTOR,APP_DIR
+          script: |
+            chmod +x ${APP_DIR}/scripts/ci/deploy-app.sh
+            ${APP_DIR}/scripts/ci/deploy-app.sh
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL_SERVER_2 }}
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_ACTOR: ${{ github.actor }}
+          APP_DIR: /home/deploy/${{ env.PROJECT_REPO }}
+
+      # ---------- VERIFY ----------
+      - name: Verify Server 1 health
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.SERVER_1_IP }}
+          username: deploy
+          key: ${{ secrets.HETZNER_BARE_METAL_GITHUB_ACTIONS_SSH_PRIVATE_KEY }}
+          script: |
+            sleep 10
+            curl -sf -H "Host: ${{ env.PROJECT_DOMAIN }}" http://localhost/health
+
+      - name: Verify Server 2 health
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.SERVER_2_IP }}
+          username: deploy
+          key: ${{ secrets.HETZNER_BARE_METAL_GITHUB_ACTIONS_SSH_PRIVATE_KEY }}
+          script: |
+            sleep 10
+            curl -sf -H "Host: ${{ env.PROJECT_DOMAIN }}" http://localhost/health
