@@ -51,7 +51,10 @@ PG_PASS=$(cat secrets/postgres_password)
 echo -n "postgresql://postgres:${PG_PASS}@haproxy:5432/${POSTGRES_DB}" > secrets/database_url
 echo "    Wrote secrets/database_url (points to local haproxy:5432, db=${POSTGRES_DB})"
 
-chmod 600 secrets/*
+# Files must be world-readable so the container's non-root appuser (UID 1001)
+# can read them. The parent dir is 0700 owned by the dev's user, so other
+# host users can't list this directory anyway.
+chmod 644 secrets/*
 
 echo ""
 echo "==> 2/4 Building images (app + Patroni) tagged as :local..."

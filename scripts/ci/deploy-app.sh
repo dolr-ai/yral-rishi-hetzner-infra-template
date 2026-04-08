@@ -31,8 +31,14 @@ echo "${GITHUB_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-st
 # to remove the secret reference from docker-compose.yml.
 if [ "${WITH_DATABASE:-true}" = "true" ]; then
     mkdir -p secrets
-    umask 077
+    chmod 700 secrets       # parent dir: only the deploy host user can list it
     echo -n "${DATABASE_URL}" > secrets/database_url
+    # The container's `appuser` (UID 1001) doesn't share UID with the host
+    # `deploy` user, so umask 077 / mode 0600 made the bind-mounted secret
+    # unreadable inside the container after we switched to non-root. The
+    # secret is still protected because the parent dir is 0700 owned by
+    # `deploy`, so other host users can't even cd into it.
+    chmod 644 secrets/database_url
 fi
 
 # Pull the new image and (re)create the container.
