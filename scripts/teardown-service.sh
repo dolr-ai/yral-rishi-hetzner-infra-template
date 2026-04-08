@@ -157,10 +157,19 @@ for SECRET in "${SWARM_STACK}_postgres_password" "${SWARM_STACK}_replication_pas
 done
 
 # ----- 4. Remove per-project overlay network -----
+# Swarm sometimes holds the network for several seconds after stack rm
+# completes. Retry up to 5 times before giving up.
 log "4/9 Removing overlay network ${OVERLAY_NETWORK}"
-ssh_to "${SERVER_1_IP}" "docker network rm ${OVERLAY_NETWORK} >/dev/null 2>&1" \
-    && ok "  removed" \
-    || warn "  not found (already gone)"
+REMOVED=0
+for i in 1 2 3 4 5; do
+    if ssh_to "${SERVER_1_IP}" "docker network rm ${OVERLAY_NETWORK} >/dev/null 2>&1"; then
+        ok "  removed (attempt $i)"
+        REMOVED=1
+        break
+    fi
+    sleep 3
+done
+[ "${REMOVED}" = "0" ] && warn "  could not remove ${OVERLAY_NETWORK} after 5 retries — clean up manually"
 
 # ----- 5. Remove app container + dir on rishi-1 + rishi-2 -----
 log "5/9 Removing app container + dir on rishi-1, rishi-2"
