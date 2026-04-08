@@ -44,9 +44,14 @@ services:
         - python
         - -c
         - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health',timeout=5).status==200 else 1)"
-      interval: 30s
-      timeout: 10s
+      # SHORT interval (5s) so the canary deploy script gets fast feedback —
+      # waiting 30s per check made deploys agonizing AND stretched the rollback
+      # window. start_period gives the app 30s to import + open the DB pool
+      # before failures count toward the unhealthy threshold.
+      interval: 5s
+      timeout: 5s
       retries: 3
+      start_period: 30s
 
 secrets:
   # CI writes ./secrets/database_url with the server-specific connection string

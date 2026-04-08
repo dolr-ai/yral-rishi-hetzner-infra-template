@@ -223,8 +223,16 @@ jobs:
           grep -v '^#' project.config | grep -v '^$' >> $GITHUB_ENV
           grep -v '^#' servers.config | grep -v '^$' >> $GITHUB_ENV
 
-      # ---------- SERVER 1 ----------
-      - name: Copy app files + project.config + CI script to Server 1
+      # ============================================================
+      # CANARY DEPLOY: rishi-1 first, with sustained verify + auto-
+      # rollback INSIDE the deploy script. If anything goes wrong on
+      # rishi-1 the script exits non-zero, this job fails BEFORE
+      # touching rishi-2, and rishi-2 stays on the previous healthy
+      # image. Cloudflare DNS round-robin keeps serving 50% of users.
+      # ============================================================
+
+      # ---------- SERVER 1 (canary) ----------
+      - name: Copy app files to Server 1
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ env.SERVER_1_IP }}
@@ -233,12 +241,13 @@ jobs:
           source: "docker-compose.yml,caddy/snippet.caddy.template,scripts/ci/deploy-app.sh,project.config"
           target: /home/deploy/${{ env.PROJECT_REPO }}
 
-      - name: Deploy app + Caddy snippet on Server 1
+      - name: Deploy + verify + auto-rollback on Server 1 (canary)
         uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ env.SERVER_1_IP }}
           username: ${{ env.DEPLOY_USER }}
           key: ${{ secrets.HETZNER_BARE_METAL_GITHUB_ACTIONS_SSH_PRIVATE_KEY }}
+          command_timeout: 5m
           envs: IMAGE_TAG,DATABASE_URL,SENTRY_DSN,GITHUB_TOKEN,GITHUB_ACTOR,APP_DIR
           script: |
             chmod +x ${APP_DIR}/scripts/ci/deploy-app.sh
@@ -251,8 +260,8 @@ jobs:
           GITHUB_ACTOR: ${{ github.actor }}
           APP_DIR: /home/deploy/${{ env.PROJECT_REPO }}
 
-      # ---------- SERVER 2 ----------
-      - name: Copy app files + project.config + CI script to Server 2
+      # ---------- SERVER 2 (only runs if Server 1 fully succeeded) ----------
+      - name: Copy app files to Server 2
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ env.SERVER_2_IP }}
@@ -261,12 +270,13 @@ jobs:
           source: "docker-compose.yml,caddy/snippet.caddy.template,scripts/ci/deploy-app.sh,project.config"
           target: /home/deploy/${{ env.PROJECT_REPO }}
 
-      - name: Deploy app + Caddy snippet on Server 2
+      - name: Deploy + verify + auto-rollback on Server 2
         uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ env.SERVER_2_IP }}
           username: ${{ env.DEPLOY_USER }}
           key: ${{ secrets.HETZNER_BARE_METAL_GITHUB_ACTIONS_SSH_PRIVATE_KEY }}
+          command_timeout: 5m
           envs: IMAGE_TAG,DATABASE_URL,SENTRY_DSN,GITHUB_TOKEN,GITHUB_ACTOR,APP_DIR
           script: |
             chmod +x ${APP_DIR}/scripts/ci/deploy-app.sh
@@ -278,24 +288,3 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_ACTOR: ${{ github.actor }}
           APP_DIR: /home/deploy/${{ env.PROJECT_REPO }}
-
-      # ---------- VERIFY ----------
-      - name: Verify Server 1 health
-        uses: appleboy/ssh-action@v1.2.0
-        with:
-          host: ${{ env.SERVER_1_IP }}
-          username: ${{ env.DEPLOY_USER }}
-          key: ${{ secrets.HETZNER_BARE_METAL_GITHUB_ACTIONS_SSH_PRIVATE_KEY }}
-          script: |
-            sleep 10
-            curl -sf -H "Host: ${{ env.PROJECT_DOMAIN }}" http://localhost/health
-
-      - name: Verify Server 2 health
-        uses: appleboy/ssh-action@v1.2.0
-        with:
-          host: ${{ env.SERVER_2_IP }}
-          username: ${{ env.DEPLOY_USER }}
-          key: ${{ secrets.HETZNER_BARE_METAL_GITHUB_ACTIONS_SSH_PRIVATE_KEY }}
-          script: |
-            sleep 10
-            curl -sf -H "Host: ${{ env.PROJECT_DOMAIN }}" http://localhost/health
