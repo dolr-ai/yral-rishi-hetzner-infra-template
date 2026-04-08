@@ -16,7 +16,9 @@ services:
   app:
     image: ${IMAGE_REPO}:${IMAGE_TAG:-latest}
     container_name: ${PROJECT_REPO}
-    restart: unless-stopped
+    # `always` (not `unless-stopped`) so the container also restarts after a
+    # crash/SIGKILL. unless-stopped sometimes doesn't kick in for SIGKILL.
+    restart: always
     expose:
       - "8000"
     networks:
@@ -33,7 +35,13 @@ services:
     secrets:
       - database_url
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      # python:3.12-slim doesn't ship curl. Use python's stdlib urllib so we
+      # don't add an apt layer just for healthchecks. Exits 0 on 2xx, 1 otherwise.
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health',timeout=5).status==200 else 1)"
       interval: 30s
       timeout: 10s
       retries: 3
