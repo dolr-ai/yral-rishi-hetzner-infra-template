@@ -73,10 +73,80 @@ issue. Email saikat@yral.com (or whoever's on dolr-ai security rotation).
 
 ## Hardening you can opt into per project
 
-- **Rate limiting in Caddy**: see the commented `rate_limit` block in
-  `caddy/snippet.caddy.template`. Requires a custom Caddy build with the
-  ratelimit plugin.
-- **Force Trivy to fail builds**: change `exit-code: "0"` to `"1"` in the
-  Trivy step of the CI workflow.
 - **Vault for app secrets**: see [`INTEGRATIONS.md`](INTEGRATIONS.md#2-vault).
   Replaces hardcoded GitHub Secrets with dynamic Vault reads.
+
+## Deferred / cluster-wide TODOs (do these BEFORE anything sensitive ships)
+
+These are important fixes that need more than a single-service change.
+Track them so they don't drift.
+
+### 1. Caddy `caddy-ratelimit` plugin
+- **What:** the official `caddy:2-alpine` doesn't include the ratelimit module.
+  Without it, every endpoint is volumetrically DOS-able (the `/health` endpoint
+  alone hits the connection pool).
+- **Plan:** build a custom Caddy with `github.com/mholt/caddy-ratelimit` and
+  bump the Caddy image on rishi-1 + rishi-2. After that, the commented
+  `rate_limit` block in `caddy/snippet.caddy.template` becomes active.
+- **Owner:** infra (Saikat — cluster-wide change).
+
+### 2. Postgres `pg_hba.conf` lockdown
+- **What:** currently `host all all 0.0.0.0/0 md5`. Postgres is only reachable
+  through the `db-internal` Swarm overlay (not the internet), so this isn't
+  catastrophic, but it's not defense-in-depth either.
+- **Plan:** restrict to the per-project overlay subnet. The hard part is that
+  Swarm assigns subnets dynamically; we'd need to either pin subnets in the
+  network create call or template `pg_hba` at deploy time.
+- **Owner:** template (do this in a future hardening pass).
+
+### 3. Pin third-party GitHub Actions to commit SHAs
+- **What:** the workflow uses `appleboy/ssh-action@v1.2.0`, `actions/checkout@v4`,
+  `docker/build-push-action@v6`, etc. Tags are mutable; a malicious tag move
+  on any of these compromises CI.
+- **Plan:** replace each tag with the corresponding commit SHA. Dependabot
+  (now enabled in `.github/dependabot.yml`) will keep them updated as PRs.
+- **Owner:** template (next hardening pass).
+
+### 4. Container image privilege scan
+- **What:** the app runs as a non-root `appuser` (since 2026-04-08), but we
+  don't yet drop kernel capabilities (`--cap-drop=ALL`) or use a read-only
+  root filesystem.
+- **Plan:** add `cap_drop: [ALL]` and `read_only: true` to `docker-compose.yml`,
+  with a tmpfs mount for `/tmp`.
+- **Owner:** template (next hardening pass).
+
+### 5. Postgres pgBouncer
+- **What:** at scale, the per-app connection pool isn't enough. PgBouncer
+  between HAProxy and Patroni would handle connection churn.
+- **Owner:** infra (when we have a service that needs it).
+
+## Active hardening already in place (as of 2026-04-08)
+
+- App container runs as **non-root `appuser`** (UID 1001) — see `Dockerfile`
+- **No public debug endpoints** — `/sentry-test` removed
+- **Trivy CRITICAL CVEs fail the build** — Trivy step in CI uses `exit-code: "1"` for CRITICAL
+- **Caddy request body limit** — `request_body { max_size 1MB }` in `caddy/snippet.caddy.template`
+- **Strict Content-Security-Policy** — `default-src 'none'; frame-ancestors 'none'` baked into the snippet
+- **Cross-Origin isolation headers** — COOP/COEP/CORP in the snippet
+- **`Cache-Control: no-store`** — default at the edge so secrets-in-responses don't get CDN-cached
+- **`gitleaks` on every push**
+- **Dependabot weekly scans** — pip + Dockerfile + GitHub Actions
+- **`scripts/rotate-secrets.sh`** — turnkey rotation for the 4 DB-related secrets
+
+## Specifically tested against `temp-demo-counter10` (whitehat exercise)
+
+When Saikat does the whitehat pass on a forked service, the things that
+should hold up:
+
+| Attack | Expected outcome | Why |
+|---|---|---|
+| `curl -X POST -H 'Content-Length: 1073741824' …` | 413 from Caddy before reaching the app | `request_body { max_size 1MB }` |
+| `curl https://<svc>/sentry-test` | 404 | endpoint removed |
+| `curl https://<svc>/`, then `docker exec` to read secrets | container is non-root; `/run/secrets` is RO tmpfs | `Dockerfile USER appuser` + `docker-compose.yml secrets` |
+| SQL injection on the counter route | not exploitable | parameterized query, no user input in SQL |
+| Reading secrets via `docker inspect` | not exposed | `/run/secrets/database_url` is a file, not an env var |
+| TLS 1.0/1.1 handshake | rejected | Caddy default minimum is TLS 1.2 |
+| Server fingerprinting via `Server:` | header is stripped | `-Server` in Caddy snippet |
+| Reflected XSS via JSON response | CSP blocks any inline script even if injected | `default-src 'none'` |
+| Stack traces leaked on 5xx | FastAPI returns generic JSON, no traceback | FastAPI default behavior |
+| Anonymous Postgres connect from internet | refused at TCP layer | DB only on `db-internal` overlay, no published port |

@@ -42,13 +42,8 @@ def health():
     return {"status": "OK", "database": "reachable"}
 
 
-@app.get("/sentry-test")
-def sentry_test():
-    """
-    Manual probe to verify Sentry is receiving events from production.
-    Hit this once after deploy then check apm.yral.com/.../?project=23
-    Returns 500 — that's expected.
-    """
-    # Use the env var so the message is correct for any service forked from this template.
-    import os
-    raise RuntimeError(f"Sentry test event from {os.environ.get('PROJECT_REPO', 'unknown-service')}")
+# NOTE: this template intentionally does NOT ship a public /sentry-test
+# endpoint. Earlier versions had one to manually fire a Sentry event after
+# deploy, but it was an unauthenticated DOS amplifier. To verify Sentry is
+# wired up after a deploy, just trigger a real error path (e.g. stop Postgres
+# briefly) and watch the apm.yral.com project — no permanent attack surface.

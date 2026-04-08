@@ -15,6 +15,15 @@ ${PROJECT_DOMAIN} {
     tls internal
     encode gzip zstd
 
+    # ----- Request size limit -----
+    # Cap the request body at 1 MB by default. Stops naive memory-exhaustion
+    # attacks (1 GB POST → app eats RAM). If your service legitimately accepts
+    # large uploads, raise this and ALSO add per-route size handling in the
+    # app (FastAPI/Starlette do not enforce a default limit).
+    request_body {
+        max_size 1MB
+    }
+
     # ----- Security headers (apply to every response) -----
     header {
         # Force HTTPS for one year, including subdomains
@@ -27,14 +36,27 @@ ${PROJECT_DOMAIN} {
         Referrer-Policy "strict-origin-when-cross-origin"
         # Lock down browser feature access by default
         Permissions-Policy "geolocation=(), microphone=(), camera=()"
+        # Strict CSP for an API service. If your service ever serves HTML,
+        # tighten / loosen this per route — never default it to 'unsafe-*'.
+        Content-Security-Policy "default-src 'none'; frame-ancestors 'none'; base-uri 'none'"
+        # Cross-origin isolation (browser hardening). Safe defaults for an
+        # API that does NOT need to be embedded as a worker by other origins.
+        Cross-Origin-Opener-Policy "same-origin"
+        Cross-Origin-Embedder-Policy "require-corp"
+        Cross-Origin-Resource-Policy "same-origin"
+        # Don't cache anything by default — this is an API, not a CDN.
+        # Per-route Cache-Control can override this from the app.
+        Cache-Control "no-store"
         # Hide upstream server identification
         -Server
     }
 
-    # ----- Rate limiting (uncomment if your service needs it) -----
+    # ----- Rate limiting (REQUIRED before public traffic — see SECURITY.md) -----
     # Caddy needs the rate-limit plugin built in. The official caddy:2-alpine
     # image does NOT include it. To enable: build a custom Caddy with
     # github.com/mholt/caddy-ratelimit and bump the Caddy image on the servers.
+    # Until then, services are vulnerable to volumetric DoS — document this
+    # explicitly with stakeholders before going live with sensitive workloads.
     #
     # rate_limit {
     #     zone per_ip {

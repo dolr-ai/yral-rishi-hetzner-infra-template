@@ -1,0 +1,52 @@
+version: 2
+# Dependabot config — surfaces dep updates as PRs so we don't run vulnerable
+# versions for months. Schedule is weekly to avoid alert fatigue.
+updates:
+  # Python deps (FastAPI, sentry-sdk, psycopg2, etc.)
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "python"
+
+  # Dev/test deps (pytest, httpx)
+  - package-ecosystem: "pip"
+    directory: "/"
+    target-branch: "main"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 3
+    allow:
+      - dependency-type: "all"
+
+  # GitHub Actions used in the workflow (checkout, build-push, scp, ssh, trivy)
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "github-actions"
+
+  # Base image of the app Dockerfile (python:3.12-slim) and patroni Dockerfile
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 3
+    labels:
+      - "dependencies"
+      - "docker"
+
+  - package-ecosystem: "docker"
+    directory: "/patroni"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 3
+    labels:
+      - "dependencies"
+      - "docker"

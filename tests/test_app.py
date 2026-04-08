@@ -30,6 +30,8 @@ def test_root_db_failure_returns_503(client, fake_db, monkeypatch):
     assert r.status_code == 503
 
 
-def test_sentry_test_endpoint_raises(client):
+def test_sentry_test_endpoint_removed(client):
+    # The /sentry-test endpoint was removed for security reasons (it was an
+    # unauthenticated DOS amplifier). Confirm it returns 404, not 500.
     r = client.get("/sentry-test")
-    assert r.status_code == 500
+    assert r.status_code == 404
