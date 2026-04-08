@@ -35,15 +35,16 @@ then check apm.yral.com — the event should appear within ~10s.
 ```python
 # Anywhere in your code:
 from infra import get_secret
-api_key = get_secret("yral-nsfw/openai", "api_key")
+api_key = get_secret("yral-myservice/openai", "api_key")
 ```
 
 **GitHub Secrets:**
 - `VAULT_TOKEN` — create a service token in Vault scoped to this project's policy.
 
-**Required policy** (create in Vault under `sys/policies/acl/yral-nsfw`):
+**Required policy** (create in Vault under `sys/policies/acl/yral-myservice`,
+where `myservice` is your project name):
 ```hcl
-path "secret/data/yral-nsfw/*" { capabilities = ["read"] }
+path "secret/data/yral-myservice/*" { capabilities = ["read"] }
 ```
 
 The helper reads the token from `/run/secrets/vault_token` first (Docker

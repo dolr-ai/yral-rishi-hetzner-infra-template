@@ -7,7 +7,7 @@
 # passwords, set 5 secrets one-at-a-time, push, watch CI). Now: one command.
 #
 # Usage:
-#   bash scripts/new-service.sh --name nsfw-detection
+#   bash scripts/new-service.sh --name my-service
 #   bash scripts/new-service.sh --name foo --target-dir ~/somewhere/else
 #   bash scripts/new-service.sh --name foo --no-push       # dry run
 #   bash scripts/new-service.sh --name foo --sentry-dsn 'https://...'
@@ -85,7 +85,7 @@ ok "gh authenticated"
 
 # Validate name format (matches init-from-template.sh)
 if ! echo "${NAME}" | grep -qE '^[a-z][a-z0-9-]*[a-z0-9]$'; then
-    die "name must be lowercase alphanumeric + hyphens (e.g. nsfw-detection); got '${NAME}'"
+    die "name must be lowercase alphanumeric + hyphens (e.g. my-service); got '${NAME}'"
 fi
 ok "name '${NAME}' is valid"
 

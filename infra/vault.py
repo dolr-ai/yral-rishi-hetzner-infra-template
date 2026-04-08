@@ -3,7 +3,7 @@ HashiCorp Vault helper for dolr-ai services.
 
 Usage:
     from infra import get_secret
-    db_password = get_secret("kv/data/yral-nsfw/db", "password")
+    db_password = get_secret("kv/data/yral-myservice/db", "password")
 
 Why a wrapper:
     - Single place to set the address (vault.yral.com) and auth method
@@ -62,7 +62,7 @@ def get_secret(path: str, key: str, mount_point: str = "secret") -> Any:
     """
     Read a single key from a KV-v2 secret.
 
-    path: e.g. "yral-nsfw/db"  (without the leading "data/")
+    path: e.g. "yral-myservice/db"  (without the leading "data/")
     key:  field within the secret
     mount_point: KV engine mount, defaults to "secret"
     """

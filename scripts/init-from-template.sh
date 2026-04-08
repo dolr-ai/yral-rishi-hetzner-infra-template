@@ -6,7 +6,7 @@
 #   bash scripts/init-from-template.sh <new-project-name>
 #
 # Example:
-#   bash scripts/init-from-template.sh nsfw-detection
+#   bash scripts/init-from-template.sh my-service
 #
 # What this does (and the only thing it does):
 #   - Edits ONE file: project.config
@@ -28,7 +28,7 @@ set -e
 
 if [ -z "$1" ]; then
     echo "Usage: bash scripts/init-from-template.sh <new-project-name>"
-    echo "Example: bash scripts/init-from-template.sh nsfw-detection"
+    echo "Example: bash scripts/init-from-template.sh my-service"
     exit 1
 fi
 
@@ -36,7 +36,7 @@ NEW_NAME="$1"
 
 # Validate the name (lowercase, alphanumeric + hyphens, no leading/trailing hyphen)
 if ! echo "$NEW_NAME" | grep -qE '^[a-z][a-z0-9-]*[a-z0-9]$'; then
-    echo "ERROR: Name must be lowercase alphanumeric with hyphens (e.g. nsfw-detection)"
+    echo "ERROR: Name must be lowercase alphanumeric with hyphens (e.g. my-service)"
     exit 1
 fi
 

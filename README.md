@@ -48,28 +48,43 @@ See [`local/README.md`](local/README.md) for full local-dev docs.
 
 ## Quick start (start a NEW service from this template)
 
+The canonical, one-command flow:
+
 ```bash
-# 1. Copy the template
-cp -r yral-rishi-hetzner-infra-template yral-nsfw-detection
-cd yral-nsfw-detection
-rm -rf .git
+cd ~/Claude\ Projects/yral-rishi-hetzner-infra-template
+bash scripts/new-service.sh --name my-service     # name must be ≤39 chars
+```
 
-# 2. Rename via the (tiny) script — edits ONLY project.config
-bash scripts/init-from-template.sh nsfw-detection
+This single command does ALL of: cp the template → run init-from-template
+→ generate strong secrets → `gh repo create` → push → set all 5 GitHub
+Secrets → watch the first CI run → verify `https://my-service.rishi.yral.com/health`.
+When it exits 0, the service is live in production.
 
-# 3. Write your business logic
-#    - Edit app/main.py and app/database.py
-#    - Edit patroni/init.sql with your DB schema (or delete if no DB)
-#    - Update requirements.txt with your Python deps
+Then write your business logic:
 
-# 4. Test locally
-bash local/setup.sh
-curl http://localhost:8080/
+```bash
+cd ~/Claude\ Projects/yral-my-service
+# Edit app/main.py + app/database.py with your routes/queries
+# Edit patroni/init.sql with your DB schema (or run scripts/strip-database.sh
+# if your service is stateless)
+bash local/setup.sh                # spin the full stack on your Mac
+curl http://localhost:8080/        # verify business logic
+git add -A && git commit -m "..." && git push    # CI redeploys
+```
 
-# 5. When green, create the GitHub repo and push
-gh repo create dolr-ai/yral-nsfw-detection --public
-# Set 9 GitHub secrets (see TEMPLATE.md)
-git init && git add -A && git commit -m "Initial commit" && git push -u origin main
+Validate end-to-end with the integration suite:
+
+```bash
+bash tests/integration/run_all.sh
+```
+
+All 4 tests must pass: server failover, server+leader failover, project
+isolation, image parity.
+
+To tear down a throwaway service:
+
+```bash
+bash scripts/teardown-service.sh --name my-service
 ```
 
 That's it. No sed across the repo, no Caddyfile coordination, no per-file

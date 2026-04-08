@@ -49,7 +49,7 @@ From inside this template repo:
 ```bash
 bash scripts/new-service.sh --name <bare-name>
 # example:
-bash scripts/new-service.sh --name nsfw-detection
+bash scripts/new-service.sh --name my-service
 ```
 
 That single command does ALL of the following:
@@ -162,12 +162,20 @@ Or just `git revert` the bad commit and let CI deploy normally.
    delete `etcd/`, `patroni/`, `haproxy/`, `scripts/swarm-setup.sh`, and the
    `deploy-db-stack` job in the workflow. Massive simplification.
 
-2. **For NSFW detection specifically:**
-   - You probably want **object storage (R2/B2)** for input images, not PostgreSQL bytea
-   - You may want **async processing** (return job ID, process in background) → needs Redis or NATS queue
-   - **No GPUs** on rishi-1/2/3 — if your model needs one, this template doesn't fit
-   - **Load model once at startup**, keep in memory (don't reload per request)
-   - **Add rate limiting** (NSFW endpoints get DoSed)
+2. **Hardware constraints to know about:**
+   - rishi-1/2/3 are CPU-only — **no GPUs**. If your service needs one, this
+     template doesn't fit; you'll need different hardware.
+   - For ML inference services in general: **load the model once at startup**
+     and keep it in memory (never per-request).
+   - For services that handle blobs (images, video, audio): use **object
+     storage (Cloudflare R2 / Backblaze B2)** for the data, not PostgreSQL
+     `bytea`. The DB is for metadata and references only.
+   - For services with public endpoints that do real work: **add rate
+     limiting** (see the commented `rate_limit` block in
+     `caddy/snippet.caddy.template` — needs a custom Caddy build with
+     `caddy-ratelimit`).
+   - For long-running work: return a job ID and process in the background
+     via a queue (Redis / NATS) instead of holding the HTTP request open.
 
 ---
 
@@ -192,9 +200,10 @@ Track them here so they don't get lost:
 - [ ] **Staging environment** — currently every push goes to prod. Options:
       separate stack name `counter-db-staging` + `staging.rishi.yral.com`
       subdomain on the SAME servers (cheap), or new servers (expensive).
-- [ ] **Automated tests** — for the counter app there's barely anything to test.
-      For NSFW detection, write pytest tests for the route + a mocked model.
-      Add a `test` job to the workflow that runs before `build-and-push`.
+- [ ] **Service-specific test coverage** — the template ships with smoke
+      tests for the counter; new services should add their own pytest tests
+      for their routes and mocked-out external dependencies before the
+      `test` job in CI gates the build.
 - [ ] **Caddy rate limiting** — `caddy-ratelimit` plugin per-IP per-endpoint.
       Important for any service with public endpoints that do real work.
 - [ ] **PgBouncer** — connection pooling AT THE PROXY LEVEL (in addition to the
