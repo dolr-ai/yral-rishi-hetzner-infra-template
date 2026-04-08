@@ -1,4 +1,5 @@
--- Creates the counter table in counter_db.
+-- Creates the counter table in this project's database.
+-- (DB name comes from POSTGRES_DB in project.config — see patroni/post_init.sh.)
 -- This runs ONCE via post_init.sh on the primary after first bootstrap.
 
 CREATE TABLE IF NOT EXISTS counter (

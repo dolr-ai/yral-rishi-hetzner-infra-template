@@ -32,6 +32,8 @@ services:
       # specific deploys. CI sets IMAGE_TAG=${{ github.sha }}.
       SENTRY_RELEASE: ${IMAGE_TAG:-unknown}
       SENTRY_ENVIRONMENT: production
+      # Exposed so app code can self-identify (e.g., the /sentry-test endpoint).
+      PROJECT_REPO: ${PROJECT_REPO}
     secrets:
       - database_url
     healthcheck:

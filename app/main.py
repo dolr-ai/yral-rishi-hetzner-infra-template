@@ -49,4 +49,6 @@ def sentry_test():
     Hit this once after deploy then check apm.yral.com/.../?project=23
     Returns 500 — that's expected.
     """
-    raise RuntimeError("Sentry test event from yral-hello-world-counter")
+    # Use the env var so the message is correct for any service forked from this template.
+    import os
+    raise RuntimeError(f"Sentry test event from {os.environ.get('PROJECT_REPO', 'unknown-service')}")
