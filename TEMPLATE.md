@@ -42,49 +42,74 @@ The infrastructure layer is reusable as-is. Only the **app layer** (`app/`,
 
 ---
 
-## Step-by-step for a new service (e.g. yral-nsfw-detection)
+## One-command bootstrap (canonical flow)
 
-### 1. Copy and rename
+From inside this template repo:
+
 ```bash
-cp -r "Claude Projects/hello-world-counter" "Claude Projects/nsfw-detection"
-cd "Claude Projects/nsfw-detection"
-rm -rf .git
-bash scripts/init-from-template.sh nsfw-detection
+bash scripts/new-service.sh --name <bare-name>
+# example:
+bash scripts/new-service.sh --name nsfw-detection
 ```
 
-### 2. Replace app code (manual)
-- Rewrite `app/main.py` with new routes
-- Rewrite `app/database.py` (or delete if no DB needed)
-- Update `requirements.txt`
-- Rewrite `patroni/init.sql` with new schema (or leave empty)
+That single command does ALL of the following:
 
-### 3. Update Caddyfile (in BOTH this repo AND every existing service repo)
-The Caddyfile gets replaced on every deploy, so all services need to know
-about each other. Add a block for the new service in every existing repo's
-`caddy/Caddyfile`.
+1. Validates prerequisites (`gh` auth, `openssl`, CI SSH key, name length ≤39 chars)
+2. Copies the template to `~/Claude Projects/yral-<name>/`
+3. Runs `scripts/init-from-template.sh` (renames identifiers in `project.config`)
+4. Generates strong `POSTGRES_PASSWORD` + `REPLICATION_PASSWORD` via `openssl rand -hex 32`
+5. Composes the two `DATABASE_URL_SERVER_*` values
+6. `git init` + initial commit
+7. `gh repo create dolr-ai/yral-<name> --public`
+8. `git push -u origin main`
+9. Sets all 5 GitHub Secrets (`HETZNER_BARE_METAL_GITHUB_ACTIONS_SSH_PRIVATE_KEY`, `POSTGRES_PASSWORD`, `REPLICATION_PASSWORD`, `DATABASE_URL_SERVER_1`, `DATABASE_URL_SERVER_2`)
+10. Watches the first CI run to completion
+11. Verifies `https://<name>.rishi.yral.com/health` returns 200
 
-### 4. Create the GitHub repo
+When the script exits 0, the service is **live in production** and you can hit the URL. Total time: ~5 minutes.
+
+Then write your business logic:
+
 ```bash
-gh repo create dolr-ai/yral-nsfw-detection --public
+cd ~/Claude\ Projects/yral-<name>
+# Edit app/main.py + app/database.py with your routes/queries
+# Edit patroni/init.sql with your DB schema (or delete + run scripts/strip-database.sh for stateless)
+# Test locally:
+bash local/setup.sh
+curl http://localhost:8080/
+# When happy:
+git add -A && git commit -m "..." && git push  # CI redeploys
 ```
 
-### 5. Add 9 GitHub secrets
-| Secret | Value |
-|---|---|
-| `SERVER_1_IP` | `138.201.137.181` |
-| `SERVER_2_IP` | `136.243.150.84` |
-| `SERVER_3_IP` | `136.243.147.225` |
-| `HETZNER_BARE_METAL_GITHUB_ACTIONS_SSH_PRIVATE_KEY` | `cat ~/.ssh/rishi-hetzner-ci-key` |
-| `SENTRY_DSN` | New project DSN from apm.yral.com |
-| `POSTGRES_PASSWORD` | `openssl rand -hex 32` (URL-safe!) |
-| `REPLICATION_PASSWORD` | `openssl rand -hex 32` |
-| `DATABASE_URL_SERVER_1` | `postgresql://postgres:<PG_PASS>@<service>-db_haproxy-rishi-1:5432/<service>_db` |
-| `DATABASE_URL_SERVER_2` | `postgresql://postgres:<PG_PASS>@<service>-db_haproxy-rishi-2:5432/<service>_db` |
+Validate the new service end-to-end with the integration suite:
 
-### 6. Initial git push → CI auto-deploys
 ```bash
-git init && git add -A && git commit -m "Initial commit" && git remote add origin git@github.com:dolr-ai/yral-<name>.git && git push -u origin main
+bash tests/integration/run_all.sh
 ```
+
+All 4 tests must pass: server failover, server+leader failover, project isolation, image parity.
+
+### Need to add Sentry?
+
+Sentry is opt-in. Pass `--sentry-dsn` to bootstrap, or set the secret manually later:
+
+```bash
+gh secret set SENTRY_DSN -b 'https://...@apm.yral.com/...' --repo dolr-ai/yral-<name>
+```
+
+The `init_sentry()` helper in `infra/sentry.py` is a no-op when the env var is empty.
+
+### Tearing down a service (e.g. throwaway test services)
+
+```bash
+bash scripts/teardown-service.sh --name <bare-name>
+```
+
+Removes the Swarm stack, volumes, secrets, network, app dir, Caddy snippet, GHCR images, GitHub repo, and local clone. Cross-project safe — never touches other services.
+
+### Manual fallback (if you want to skip the bootstrap)
+
+The old way is still in `scripts/init-from-template.sh`. Inspect that file for the manual steps. The bootstrap script just automates them.
 
 ---
 

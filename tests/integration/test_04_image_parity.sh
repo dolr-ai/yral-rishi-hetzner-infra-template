@@ -22,11 +22,13 @@ HASH_CMD='set -e; for f in main.py database.py infra/sentry.py infra/vault.py in
     if [ -f "$f" ]; then md5sum "$f"; else echo "MISSING $f"; fi
 done; pip freeze 2>/dev/null | sort | md5sum | sed "s/-$/pip-freeze/"'
 
-# 1. Make sure the local image exists
-if ! docker image inspect "${LOCAL_TAG}" >/dev/null 2>&1; then
-    log "local image ${LOCAL_TAG} not found; building from ${REPO_ROOT}"
-    docker build --network=host -t "${LOCAL_TAG}" "${REPO_ROOT}" >/dev/null || die "local build failed"
-fi
+# 1. ALWAYS rebuild the local image so we're testing what's currently on disk,
+#    not a stale cached version. Docker layer caching makes this fast (~1s
+#    when nothing changed). The early version of this test skipped rebuild if
+#    the image existed, which gave a misleading FAIL when the local source had
+#    changed since the last bash local/setup.sh.
+log "rebuilding ${LOCAL_TAG} from ${REPO_ROOT}"
+docker build -t "${LOCAL_TAG}" "${REPO_ROOT}" >/dev/null 2>&1 || die "local build failed"
 
 # 2. Hash inside the local image
 log "computing hashes inside ${LOCAL_TAG}"

@@ -40,6 +40,17 @@ if ! echo "$NEW_NAME" | grep -qE '^[a-z][a-z0-9-]*[a-z0-9]$'; then
     exit 1
 fi
 
+# Docker Swarm has a hard 63-char limit on combined "<stack>_<service>" names.
+# Stack name = "${NAME}-db" (NAME+3). Longest combined Swarm secret name is
+# "${NAME}-db_replication_password" (NAME+24). NAME+24 must be ≤63 → NAME ≤39.
+NAME_LEN=${#NEW_NAME}
+if [ ${NAME_LEN} -gt 39 ]; then
+    echo "ERROR: Name '${NEW_NAME}' is ${NAME_LEN} chars; max is 39."
+    echo "       Reason: Docker Swarm secret '${NEW_NAME}-db_replication_password'"
+    echo "       would be $((NAME_LEN + 24)) chars, exceeding the 63-char limit."
+    exit 1
+fi
+
 # Underscore version for the Postgres database name
 NEW_NAME_UNDERSCORE=$(echo "$NEW_NAME" | tr '-' '_')
 

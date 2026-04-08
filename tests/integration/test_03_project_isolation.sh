@@ -45,12 +45,17 @@ check_contains PROJECT_REPO       "${PROJECT_REPO}"
 log "static: repo files must not contain other dolr-ai service identifiers"
 FOREIGN_NAMES="hello-world hello_world counter-db counter_db"
 for foreign in ${FOREIGN_NAMES}; do
-    # Allowed in markdown docs / comments / this test itself
+    # Allowed in: markdown docs, tests/, conftest.py, and shell-comment lines
+    # (lines whose first non-whitespace char is `#`). The shell-comment exclusion
+    # lets scripts/teardown-service.sh and similar mention these names in
+    # explanatory comments without triggering false positives.
     HITS=$(grep -rIn --exclude-dir=.git --exclude-dir=tests --exclude='*.md' \
         --exclude='conftest.py' "${foreign}" "${REPO_ROOT}" 2>/dev/null | \
-        grep -v "^${REPO_ROOT}/tests/" | head -3 || true)
+        grep -v "^${REPO_ROOT}/tests/" | \
+        grep -vE ':[[:space:]]*#' | \
+        head -3 || true)
     if [ -n "${HITS}" ]; then
-        fail "  found '${foreign}' in non-doc files:"
+        fail "  found '${foreign}' in non-doc, non-comment files:"
         echo "${HITS}" | sed 's/^/      /'
     else
         pass "  no references to '${foreign}'"

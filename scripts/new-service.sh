@@ -89,11 +89,18 @@ if ! echo "${NAME}" | grep -qE '^[a-z][a-z0-9-]*[a-z0-9]$'; then
 fi
 ok "name '${NAME}' is valid"
 
-# Postgres DB name limit is 63 chars (and we add '_db' suffix)
+# Postgres DB name limit is 63 chars (we add '_db' suffix)
 NAME_UNDERSCORE=$(echo "${NAME}" | tr '-' '_')
 DB_NAME_LEN=$((${#NAME_UNDERSCORE} + 3))
 [ ${DB_NAME_LEN} -gt 63 ] && die "name too long: '${NAME_UNDERSCORE}_db' would be ${DB_NAME_LEN} chars > 63 (Postgres limit)"
 ok "db name length OK (${DB_NAME_LEN}/63)"
+
+# DOCKER SWARM service-name limit is 63 chars (combined as <stack>_<service>).
+# Stack name is "${NAME}-db" (NAME+3). Longest service-or-secret suffix is
+# "_replication_password" (21 chars). So NAME+3+21 = NAME+24 must be ≤63.
+SWARM_NAME_LEN=$(( ${#NAME} + 24 ))
+[ ${SWARM_NAME_LEN} -gt 63 ] && die "name too long: combined Swarm secret name '${NAME}-db_replication_password' would be ${SWARM_NAME_LEN} chars > 63 (Docker Swarm limit). Use a name ≤39 characters."
+ok "swarm name length OK (${SWARM_NAME_LEN}/63)"
 
 # CI SSH key
 TEMPLATE_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -206,9 +213,16 @@ set_secret() {
         warn "  skipping ${key} (empty)"
         return
     fi
-    printf '%s' "${value}" | gh secret set "${key}" --repo "${ORG}/${PROJECT_REPO}" --body - >/dev/null 2>&1 \
-        && ok "  set ${key}" \
-        || err "  failed to set ${key}"
+    # NOTE: gh secret set's stdin reading is unreliable across versions.
+    # The only thing that consistently works is the -b/--body flag with the
+    # value as a quoted argument. Bash preserves newlines in quoted variables
+    # so multi-line values (like the SSH private key) survive correctly.
+    # Do NOT use --body - (literal "-") or pipe via stdin (silently empty).
+    if gh secret set "${key}" --repo "${ORG}/${PROJECT_REPO}" -b "${value}" >/dev/null 2>&1; then
+        ok "  set ${key}"
+    else
+        err "  failed to set ${key}"
+    fi
 }
 
 set_secret HETZNER_BARE_METAL_GITHUB_ACTIONS_SSH_PRIVATE_KEY "$(cat "${SSH_KEY}")"
