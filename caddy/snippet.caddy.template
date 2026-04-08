@@ -16,12 +16,14 @@ ${PROJECT_DOMAIN} {
     encode gzip zstd
 
     # ----- Request size limit -----
-    # Cap the request body at 1 MB by default. Stops naive memory-exhaustion
-    # attacks (1 GB POST → app eats RAM). If your service legitimately accepts
-    # large uploads, raise this and ALSO add per-route size handling in the
-    # app (FastAPI/Starlette do not enforce a default limit).
+    # Cap the request body at 100 MB. Stops naive memory-exhaustion attacks
+    # (1 GB POST → app eats RAM) but leaves headroom for services that may
+    # legitimately accept large media uploads (audio, video, images). If a
+    # specific service needs more, override this in its own snippet AND add
+    # per-route size handling in the app (FastAPI/Starlette do not enforce
+    # a default limit on their own).
     request_body {
-        max_size 1MB
+        max_size 100MB
     }
 
     # ----- Security headers (apply to every response) -----

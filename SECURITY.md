@@ -125,7 +125,7 @@ Track them so they don't drift.
 - App container runs as **non-root `appuser`** (UID 1001) — see `Dockerfile`
 - **No public debug endpoints** — `/sentry-test` removed
 - **Trivy CRITICAL CVEs fail the build** — Trivy step in CI uses `exit-code: "1"` for CRITICAL
-- **Caddy request body limit** — `request_body { max_size 1MB }` in `caddy/snippet.caddy.template`
+- **Caddy request body limit** — `request_body { max_size 100MB }` in `caddy/snippet.caddy.template` (sized for occasional audio/video uploads while still blocking the trivial 1 GB POST attack)
 - **Strict Content-Security-Policy** — `default-src 'none'; frame-ancestors 'none'` baked into the snippet
 - **Cross-Origin isolation headers** — COOP/COEP/CORP in the snippet
 - **`Cache-Control: no-store`** — default at the edge so secrets-in-responses don't get CDN-cached
@@ -140,7 +140,7 @@ should hold up:
 
 | Attack | Expected outcome | Why |
 |---|---|---|
-| `curl -X POST -H 'Content-Length: 1073741824' …` | 413 from Caddy before reaching the app | `request_body { max_size 1MB }` |
+| `curl -X POST -H 'Content-Length: 1073741824' …` | 413 from Caddy before reaching the app | `request_body { max_size 100MB }` |
 | `curl https://<svc>/sentry-test` | 404 | endpoint removed |
 | `curl https://<svc>/`, then `docker exec` to read secrets | container is non-root; `/run/secrets` is RO tmpfs | `Dockerfile USER appuser` + `docker-compose.yml secrets` |
 | SQL injection on the counter route | not exploitable | parameterized query, no user input in SQL |
