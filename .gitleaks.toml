@@ -1,0 +1,17 @@
+# gitleaks config — extends the default ruleset.
+# Run locally:  gitleaks detect --source . --config .gitleaks.toml
+[extend]
+useDefault = true
+
+# Allow the placeholder strings used in committed config files.
+[allowlist]
+description = "Known-safe placeholders and example values"
+regexes = [
+  '''PLACEHOLDER_OVERRIDDEN_BY_PATRONI_SCOPE_ENV''',
+  '''postgresql://postgres:POSTGRES_PASSWORD@''',  # docs example
+]
+paths = [
+  '''(.*?)\.md$''',
+  '''local/secrets/.*''',  # local-only, gitignored
+  '''secrets/.*''',        # CI-only, gitignored
+]

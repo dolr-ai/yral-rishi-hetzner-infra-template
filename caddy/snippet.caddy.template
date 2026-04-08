@@ -13,5 +13,41 @@
 # any other project's file. Zero coupling between projects at the Caddy layer.
 ${PROJECT_DOMAIN} {
     tls internal
-    reverse_proxy ${PROJECT_REPO}:8000
+    encode gzip zstd
+
+    # ----- Security headers (apply to every response) -----
+    header {
+        # Force HTTPS for one year, including subdomains
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        # Prevent MIME-type sniffing
+        X-Content-Type-Options "nosniff"
+        # Disallow framing (clickjacking protection)
+        X-Frame-Options "DENY"
+        # Don't leak referrer to other origins
+        Referrer-Policy "strict-origin-when-cross-origin"
+        # Lock down browser feature access by default
+        Permissions-Policy "geolocation=(), microphone=(), camera=()"
+        # Hide upstream server identification
+        -Server
+    }
+
+    # ----- Rate limiting (uncomment if your service needs it) -----
+    # Caddy needs the rate-limit plugin built in. The official caddy:2-alpine
+    # image does NOT include it. To enable: build a custom Caddy with
+    # github.com/mholt/caddy-ratelimit and bump the Caddy image on the servers.
+    #
+    # rate_limit {
+    #     zone per_ip {
+    #         key {remote_host}
+    #         events 60
+    #         window 1m
+    #     }
+    # }
+
+    reverse_proxy ${PROJECT_REPO}:8000 {
+        # Pass real client info to the app
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+    }
 }

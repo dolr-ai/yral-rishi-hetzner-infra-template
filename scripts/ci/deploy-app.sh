@@ -26,10 +26,14 @@ echo "==> Deploying ${PROJECT_REPO} (${IMAGE_TAG})"
 echo "${GITHUB_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
 
 # Write DATABASE_URL to a secret file (mounted into the container at /run/secrets/database_url).
-# This keeps the password out of `docker inspect`.
-mkdir -p secrets
-umask 077
-echo -n "${DATABASE_URL}" > secrets/database_url
+# This keeps the password out of `docker inspect`. Skipped for stateless services
+# (WITH_DATABASE=false) — those should have run scripts/strip-database.sh once
+# to remove the secret reference from docker-compose.yml.
+if [ "${WITH_DATABASE:-true}" = "true" ]; then
+    mkdir -p secrets
+    umask 077
+    echo -n "${DATABASE_URL}" > secrets/database_url
+fi
 
 # Pull the new image and (re)create the container.
 # IMAGE_TAG, IMAGE_REPO, PROJECT_REPO, OVERLAY_NETWORK etc. are already

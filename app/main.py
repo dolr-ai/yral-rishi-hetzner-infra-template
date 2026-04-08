@@ -1,46 +1,12 @@
-import logging
-import os
-import socket
-
 import sentry_sdk
 from fastapi import FastAPI, HTTPException
-from sentry_sdk.integrations.fastapi import FastApiIntegration
-from sentry_sdk.integrations.logging import LoggingIntegration
-from sentry_sdk.integrations.starlette import StarletteIntegration
 
 from database import get_next_count, check_db_health
+from infra import init_sentry
 
-# ----------------------------------------------------------------------------
-# Sentry initialization
-#
-# WHY explicit integrations?
-# By default sentry_sdk auto-detects FastAPI/Starlette but enabling them
-# explicitly is more reliable across versions and makes the config readable.
-#
-# WHY traces_sample_rate=1.0?
-# This is a low-traffic service. We capture every transaction so the
-# performance tab in Sentry actually has data. For high-traffic services
-# you'd want 0.1 (10%) or lower to control cost.
-#
-# WHY server_name?
-# Lets you filter Sentry events by which app server they came from
-# (rishi-1 vs rishi-2). Helpful when one server has issues.
-# ----------------------------------------------------------------------------
-sentry_sdk.init(
-    dsn=os.environ.get("SENTRY_DSN", ""),
-    environment=os.environ.get("SENTRY_ENVIRONMENT", "production"),
-    release=os.environ.get("SENTRY_RELEASE"),  # set to git SHA by Dockerfile
-    server_name=socket.gethostname(),
-    integrations=[
-        StarletteIntegration(transaction_style="endpoint"),
-        FastApiIntegration(transaction_style="endpoint"),
-        LoggingIntegration(level=logging.INFO, event_level=logging.ERROR),
-    ],
-    traces_sample_rate=1.0,           # capture every transaction (perf monitoring)
-    profiles_sample_rate=1.0,         # capture every profile (CPU profiling)
-    send_default_pii=False,           # don't send IP addresses, headers, cookies
-    attach_stacktrace=True,           # include stack trace on error events
-)
+# Wire Sentry via the shared helper (no-op if SENTRY_DSN is empty).
+# See infra/sentry.py + INTEGRATIONS.md for tunables.
+init_sentry()
 
 app = FastAPI()
 
