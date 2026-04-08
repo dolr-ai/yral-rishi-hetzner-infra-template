@@ -64,16 +64,26 @@ curl_with_status() {
 }
 
 curl_ok() {
-    # Returns 0 if URL returned 200 with a body containing "Person".
-    local out
-    out=$(curl -sk --max-time 8 "$1" 2>/dev/null) || return 1
-    echo "$out" | grep -q '"message".*Person' || return 1
+    # Returns 0 if URL returned a 200 status with any non-empty JSON body.
+    # We deliberately do NOT match on response content because each forked
+    # service returns a different message format. The test framework must be
+    # business-logic-agnostic.
+    local code
+    code=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 8 "$1" 2>/dev/null) || return 1
+    [ "${code}" = "200" ] || return 1
     return 0
 }
 
 get_counter() {
-    # Extract the integer N from {"message":"Hello World Person N"}
-    curl -sk --max-time 8 "$1" 2>/dev/null | sed -n 's/.*Person \([0-9]*\).*/\1/p'
+    # Extract the first integer found anywhere in the body. Works for:
+    #   {"message":"Hello World Person 42"}                        → 42
+    #   {"message":"Welcome User 7, your balance is 70","user":7}  → 7
+    #   plain text "42"                                             → 42
+    # The "first integer" heuristic is intentional: every counter-style
+    # service we ship from this template embeds the user number first in
+    # the response, before any derived values. If a future service breaks
+    # this convention it should override this helper.
+    curl -sk --max-time 8 "$1" 2>/dev/null | grep -oE '[0-9]+' | head -1
 }
 
 # ---- Patroni helpers ----

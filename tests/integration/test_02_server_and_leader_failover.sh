@@ -65,8 +65,8 @@ SUCCESS=0; FAIL_COUNT=0; LAST_5_SUCCESS=0
 declare -a recent
 for i in $(seq 1 20); do
     sleep 3
-    RESP=$(curl -sk --max-time 8 "${URL}" 2>/dev/null || echo "")
-    if echo "${RESP}" | grep -q '"message".*Person'; then
+    CODE=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 8 "${URL}" 2>/dev/null || echo "000")
+    if [ "${CODE}" = "200" ]; then
         SUCCESS=$((SUCCESS+1))
         recent+=(1)
         log "  [+$((i*3))s] OK"

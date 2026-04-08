@@ -1,6 +1,6 @@
 import os
 import psycopg2
-from psycopg2 import OperationalError, InterfaceError
+from psycopg2 import OperationalError, InterfaceError, errors as pg_errors
 from psycopg2.pool import ThreadedConnectionPool
 
 
@@ -45,23 +45,27 @@ _pool = ThreadedConnectionPool(minconn=2, maxconn=10, dsn=DATABASE_URL)
 
 def _execute_with_retry(operation, max_attempts: int = 3):
     """
-    Run a database operation with retry-on-dead-connection logic.
+    Run a database operation with retry on three classes of recoverable error:
 
-    WHY this exists:
-    psycopg2's ThreadedConnectionPool does NOT validate connections before
-    returning them. If a connection in the pool died (Patroni failover,
-    network blip, idle timeout), getconn() happily returns the dead one and
-    the next query fails with OperationalError or InterfaceError.
+    1. Dead connection (OperationalError / InterfaceError):
+       psycopg2's ThreadedConnectionPool does NOT validate connections before
+       returning them. If a connection in the pool died (network blip, idle
+       timeout, leader crash), getconn() happily returns the dead one and the
+       next query fails. Discard the connection and try again with a fresh one.
 
-    This wrapper:
-      1. Gets a connection from the pool
-      2. Tries the operation
-      3. On connection error: closes the dead connection (removes it from pool),
-         gets a fresh one, retries
-      4. After max_attempts, gives up and re-raises
+    2. Read-only transaction (psycopg2.errors.ReadOnlySqlTransaction, SQLSTATE
+       25006): after a Patroni failover, the app's pooled connection may still
+       be talking to the OLD primary which is now a streaming replica. The
+       replica accepts SELECT but rejects UPDATE / INSERT / DELETE with this
+       error. HAProxy's /master health check will route NEW connections to the
+       new leader within ~3s — so dropping the bad connection and retrying
+       almost always succeeds on the very next attempt.
 
-    For non-connection errors (e.g. SQL syntax), it does NOT retry — those
-    are bugs and retrying won't help.
+    3. Admin shutdown / crash recovery (also OperationalError sometimes, but
+       handled by case 1).
+
+    For non-recoverable errors (SQL syntax, constraint violation) we do NOT
+    retry — those are bugs and retrying won't help.
     """
     last_exc = None
     for attempt in range(max_attempts):
@@ -70,11 +74,12 @@ def _execute_with_retry(operation, max_attempts: int = 3):
             result = operation(conn)
             _pool.putconn(conn)
             return result
-        except (OperationalError, InterfaceError) as e:
+        except (OperationalError, InterfaceError, pg_errors.ReadOnlySqlTransaction) as e:
             last_exc = e
-            # Discard the dead connection from the pool — close=True ensures
-            # it's actually closed instead of being returned to the pool to
-            # bite the next request.
+            # Discard the bad connection from the pool — close=True ensures
+            # it's actually closed instead of being returned to bite the next
+            # request. For read-only errors this is what forces HAProxy to
+            # hand us a connection to the new primary on the next getconn().
             try:
                 _pool.putconn(conn, close=True)
             except Exception:

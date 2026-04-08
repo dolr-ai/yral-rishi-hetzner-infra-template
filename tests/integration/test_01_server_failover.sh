@@ -51,9 +51,11 @@ SUCCESS=0; FAIL_COUNT=0
 PREV_COUNTER=${START}
 for i in 1 2 3 4 5 6 7 8 9 10; do
     sleep 3
-    RESP=$(curl -sk --max-time 8 "${URL}" 2>/dev/null || echo "")
-    if echo "${RESP}" | grep -q '"message".*Person'; then
-        N=$(echo "${RESP}" | sed -n 's/.*Person \([0-9]*\).*/\1/p')
+    CODE=$(curl -sk -o /tmp/_resp.$$ -w '%{http_code}' --max-time 8 "${URL}" 2>/dev/null || echo "000")
+    RESP=$(cat /tmp/_resp.$$ 2>/dev/null); rm -f /tmp/_resp.$$
+    if [ "${CODE}" = "200" ]; then
+        # Service-agnostic: extract the first integer from the body. See lib.sh.
+        N=$(echo "${RESP}" | grep -oE '[0-9]+' | head -1)
         if [ -n "${N}" ] && [ "${N}" -gt "${PREV_COUNTER}" ]; then
             SUCCESS=$((SUCCESS+1))
             PREV_COUNTER=${N}

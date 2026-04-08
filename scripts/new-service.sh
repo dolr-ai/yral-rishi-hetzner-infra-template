@@ -233,16 +233,28 @@ set_secret DATABASE_URL_SERVER_2 "${DB_URL_2}"
 [ -n "${SENTRY_DSN}" ] && set_secret SENTRY_DSN "${SENTRY_DSN}"
 
 # ----- 10. watch CI -----
-log "9/12 Waiting for CI run to start..."
-sleep 5
-RID=$(gh run list --repo "${ORG}/${PROJECT_REPO}" --limit 1 --json databaseId -q '.[0].databaseId' 2>/dev/null || echo "")
+# IMPORTANT: filter by --workflow=deploy.yml. On a fresh repo, the
+# `dependabot.yml` we ship triggers a Dependabot scan run on the very first
+# push, and that run usually finishes BEFORE the deploy run does. Without the
+# filter, `gh run list --limit 1` returns the Dependabot run instead of the
+# deploy run, and the bootstrap reports "CI completed successfully" while
+# the actual deploy is still in flight (or has failed).
+log "9/12 Waiting for deploy.yml run to start..."
+RID=""
+for i in 1 2 3 4 5 6; do
+    sleep 5
+    RID=$(gh run list --repo "${ORG}/${PROJECT_REPO}" --workflow=deploy.yml --limit 1 \
+            --json databaseId -q '.[0].databaseId' 2>/dev/null || echo "")
+    [ -n "${RID}" ] && break
+    log "  (attempt ${i}/6, no run yet)"
+done
 if [ -n "${RID}" ]; then
-    log "watching run ${RID} (this can take ~5 minutes for the first deploy)"
+    log "watching deploy.yml run ${RID} (this can take ~5 minutes for the first deploy)"
     gh run watch "${RID}" --repo "${ORG}/${PROJECT_REPO}" --exit-status >/dev/null 2>&1 \
         && ok "CI run completed successfully" \
         || warn "CI run did not finish cleanly. Inspect with: gh run view ${RID} --repo ${ORG}/${PROJECT_REPO} --log-failed"
 else
-    warn "no CI run found yet — push may still be propagating"
+    warn "no deploy.yml run found after 30s — push may still be propagating"
 fi
 
 # ----- 11. verify /health -----
