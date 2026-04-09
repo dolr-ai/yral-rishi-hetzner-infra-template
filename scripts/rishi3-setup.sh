@@ -1,6 +1,12 @@
 #!/bin/bash
 # =============================================================================
-# ONE-TIME SETUP for rishi-3 (136.243.147.225)
+# LEGACY — use scripts/add-server.sh instead.
+#
+# add-server.sh does everything this script does but is generic (takes
+# --name and --ip as args) and reads from servers.config instead of
+# hardcoding the IP. This file is kept only for historical reference.
+#
+# Original purpose: ONE-TIME SETUP for rishi-3 (136.243.147.225)
 # Run from your Mac ONCE before the first deploy:
 #   bash scripts/rishi3-setup.sh
 #
