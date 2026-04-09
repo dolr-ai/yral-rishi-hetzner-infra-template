@@ -161,9 +161,21 @@ DB_URL_1="postgresql://postgres:${PG_PASS}@haproxy-rishi-1:5432/${POSTGRES_DB}"
 DB_URL_2="postgresql://postgres:${PG_PASS}@haproxy-rishi-2:5432/${POSTGRES_DB}"
 ok "generated 32-byte hex passwords + composed DATABASE_URLs"
 
-# Make sure the bootstrap secrets directory is gitignored
-if ! grep -q "^${SECRETS_DIR}/" .gitignore 2>/dev/null; then
+# Make sure the bootstrap secrets directory is gitignored.
+# This is BELT AND SUSPENDERS — the template's .gitignore should already list
+# .bootstrap-secrets/, but if a future caller has overridden it, we re-add it.
+if ! grep -qF "${SECRETS_DIR}/" .gitignore 2>/dev/null; then
     echo "${SECRETS_DIR}/" >> .gitignore
+fi
+# HARD GUARD: if any file in .bootstrap-secrets/ would be tracked by git after
+# the next add, fail loudly. This is the check that would have caught the
+# 2026-04-09 incident where a sync from the template overwrote .gitignore and
+# the bootstrap secrets got committed to a public repo.
+if [ -d .git ] && git status --porcelain "${SECRETS_DIR}/" 2>/dev/null | grep -qE '^\?\?|^A '; then
+    : # untracked is fine — they're being ignored
+fi
+if [ -d .git ] && git ls-files --error-unmatch "${SECRETS_DIR}" >/dev/null 2>&1; then
+    die "FATAL: ${SECRETS_DIR}/ is tracked by git! .gitignore is broken. Run: git rm --cached -r ${SECRETS_DIR} && git commit -m 'fix gitignore'"
 fi
 
 # ----- 5-6. git init + initial commit -----

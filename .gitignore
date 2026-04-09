@@ -1,6 +1,15 @@
 # Secrets — written by CI on the server, never committed
 secrets/
 
+# Bootstrap secrets — written locally by scripts/new-service.sh on first run.
+# This MUST stay gitignored permanently. We learned the hard way: if a
+# service forked from this template re-syncs from the template via rsync/cp
+# without re-applying the gitignore, the bootstrap secrets get committed
+# and force-pushed to a public repo. Keeping the entry in the template's
+# .gitignore means any service forked from this template inherits the
+# protection automatically.
+.bootstrap-secrets/
+
 # Python
 __pycache__/
 *.pyc

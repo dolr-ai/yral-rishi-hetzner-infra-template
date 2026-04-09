@@ -133,19 +133,27 @@ for i in $(seq 1 20); do
     sleep 3
 done
 
-# ----- 2. Remove Patroni volumes on each server -----
-log "2/9 Removing Patroni data volumes"
+# ----- 2. Remove Patroni + etcd volumes on each server -----
+# Both stacks create per-node data volumes. Earlier versions of this script
+# only removed the patroni volumes and left etcd volumes orphaned, which
+# accumulated over multiple teardown/redeploy cycles. Now we sweep ALL
+# volumes prefixed with the swarm stack name on every node.
+log "2/9 Removing Patroni + etcd data volumes (every ${SWARM_STACK}_* on every node)"
 for ip in "${SERVER_1_IP}" "${SERVER_2_IP}" "${SERVER_3_IP}"; do
     HOST=$(ssh_to "$ip" 'hostname')
-    # Volume names: <SWARM_STACK>_patroni-rishi-N-data
-    for n in 1 2 3; do
-        VOL="${SWARM_STACK}_patroni-rishi-${n}-data"
-        if ssh_to "$ip" "docker volume inspect ${VOL} >/dev/null 2>&1"; then
-            ssh_to "$ip" "docker volume rm ${VOL} >/dev/null 2>&1" \
-                && ok "  ${HOST}: removed ${VOL}" \
-                || warn "  ${HOST}: could not remove ${VOL} (in use?)"
+    LEFTOVER=$(ssh_to "$ip" "docker volume ls -q | grep '^${SWARM_STACK}_' || true")
+    if [ -z "${LEFTOVER}" ]; then
+        ok "  ${HOST}: clean"
+        continue
+    fi
+    while IFS= read -r VOL; do
+        [ -z "${VOL}" ] && continue
+        if ssh_to "$ip" "docker volume rm ${VOL} >/dev/null 2>&1"; then
+            ok "  ${HOST}: removed ${VOL}"
+        else
+            warn "  ${HOST}: could not remove ${VOL} (in use? Swarm may still be draining)"
         fi
-    done
+    done <<< "${LEFTOVER}"
 done
 
 # ----- 3. Remove namespaced Swarm secrets -----
