@@ -1,0 +1,21 @@
+# Prevent secrets, git history, and dev artifacts from being sent to the
+# Docker build context. Without this file, `docker build .` sends EVERYTHING
+# in the repo — including .bootstrap-secrets/, secrets/, .git/, etc.
+.git
+.github
+.bootstrap-secrets
+secrets
+local
+tests
+scripts
+*.md
+.gitignore
+.gitleaks.toml
+.dockerignore
+__pycache__
+*.pyc
+.venv
+venv
+.DS_Store
+.idea
+.vscode

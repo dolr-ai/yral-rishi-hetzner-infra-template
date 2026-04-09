@@ -19,6 +19,13 @@ services:
     # `always` (not `unless-stopped`) so the container also restarts after a
     # crash/SIGKILL. unless-stopped sometimes doesn't kick in for SIGKILL.
     restart: always
+    # Resource limits — prevent a single app container from OOM-killing the
+    # host or starving other services (Patroni, etcd, HAProxy, Caddy).
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '1.0'
     expose:
       - "8000"
     networks:

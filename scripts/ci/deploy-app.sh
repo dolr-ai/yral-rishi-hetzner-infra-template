@@ -33,6 +33,10 @@
 
 set -e
 
+if [ ! -d "${APP_DIR}" ]; then
+    echo "FATAL: APP_DIR does not exist: ${APP_DIR}"
+    exit 1
+fi
 cd "${APP_DIR}"
 
 # Auto-export every line in project.config so docker compose interpolates ${VAR}
