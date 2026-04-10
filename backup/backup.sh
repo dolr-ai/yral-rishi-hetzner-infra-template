@@ -35,11 +35,15 @@ PGUSER="${PGUSER:-postgres}"
 RETENTION_DAILY="${BACKUP_RETENTION_DAILY:-7}"
 RETENTION_WEEKLY="${BACKUP_RETENTION_WEEKLY:-4}"
 
-TIMESTAMP=$(date -u +%Y-%m-%d_%H%M%S)
+TIMESTAMP=$(date -u +%H%M%S)
 DATE_ONLY=$(date -u +%Y-%m-%d)
 DAY_OF_WEEK=$(date -u +%u)  # 1=Monday, 7=Sunday
-DUMP_FILE="/tmp/${PROJECT_REPO}_${TIMESTAMP}.sql.gz"
+DUMP_FILE="/tmp/${PROJECT_REPO}_${DATE_ONLY}_${TIMESTAMP}.sql.gz"
 S3_PREFIX="s3://${BACKUP_S3_BUCKET}/${PROJECT_REPO}"
+
+# Hetzner Object Storage uses path-style addressing (bucket in the URL path,
+# not in the hostname). Set this so aws-cli doesn't try virtual-hosted style.
+export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-hel1}"
 
 log() { echo "[backup] $(date -u +%H:%M:%S) $*"; }
 
@@ -67,10 +71,11 @@ log "dump complete: ${DUMP_SIZE} bytes (compressed)"
 
 # ----- 2. Upload to daily/ -----
 S3_DAILY_KEY="${S3_PREFIX}/daily/${DATE_ONLY}_${TIMESTAMP}.sql.gz"
+# e.g. s3://rishi-yral/yral-my-service/daily/2026-04-10_030000.sql.gz
 log "uploading to ${S3_DAILY_KEY}..."
 aws s3 cp "${DUMP_FILE}" "${S3_DAILY_KEY}" \
     --endpoint-url "${BACKUP_S3_ENDPOINT}" \
-    --quiet
+    --no-progress
 
 # ----- 3. Copy to weekly/ on Sundays -----
 if [ "${DAY_OF_WEEK}" = "7" ]; then
@@ -78,7 +83,7 @@ if [ "${DAY_OF_WEEK}" = "7" ]; then
     log "Sunday — copying to weekly: ${S3_WEEKLY_KEY}"
     aws s3 cp "${DUMP_FILE}" "${S3_WEEKLY_KEY}" \
         --endpoint-url "${BACKUP_S3_ENDPOINT}" \
-        --quiet
+        --no-progress
 fi
 
 rm -f "${DUMP_FILE}"
