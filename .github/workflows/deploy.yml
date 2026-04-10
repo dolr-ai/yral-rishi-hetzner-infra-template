@@ -158,7 +158,7 @@ jobs:
           host: ${{ env.SERVER_1_IP }}
           username: ${{ env.DEPLOY_USER }}
           key: ${{ secrets.HETZNER_BARE_METAL_GITHUB_ACTIONS_SSH_PRIVATE_KEY }}
-          source: "etcd/stack.yml,patroni/stack.yml,haproxy/stack.yml,haproxy/haproxy.cfg,backup/stack.yml,scripts/ci/deploy-db-stack.sh,project.config"
+          source: "etcd/stack.yml,patroni/stack.yml,haproxy/stack.yml,haproxy/haproxy.cfg,scripts/ci/deploy-db-stack.sh,project.config"
           target: /home/deploy/${{ env.SWARM_STACK }}-stack
 
       - name: Pre-pull Patroni image on Server 1

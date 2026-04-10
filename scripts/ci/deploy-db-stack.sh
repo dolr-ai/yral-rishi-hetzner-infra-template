@@ -69,23 +69,51 @@ fi
 # IMAGE_TAG was already exported by the CI workflow, but be explicit for clarity
 export IMAGE_TAG="${IMAGE_TAG}"
 
-# Export S3 backup credentials (passed by CI from GitHub Secrets).
-# These are env vars that the backup container reads — never written to disk.
-export BACKUP_S3_ACCESS_KEY="${BACKUP_S3_ACCESS_KEY:-}"
-export BACKUP_S3_SECRET_KEY="${BACKUP_S3_SECRET_KEY:-}"
-export BACKUP_IMAGE_REPO="${IMAGE_REPO}-backup"
-
 # Deploy (or update) the stack. Idempotent.
-# The backup stack is included only if the backup Dockerfile + stack.yml exist.
-COMPOSE_FILES="-c etcd-stack.yml -c patroni-stack.yml -c haproxy-stack.yml"
-if [ -f backup-stack.yml ]; then
-    COMPOSE_FILES="${COMPOSE_FILES} -c backup-stack.yml"
-fi
 docker stack deploy \
     --with-registry-auth \
-    ${COMPOSE_FILES} \
+    -c etcd-stack.yml \
+    -c patroni-stack.yml \
+    -c haproxy-stack.yml \
     "${SWARM_STACK}"
 
 echo ""
 echo "Stack deployed. Service status:"
 docker stack services "${SWARM_STACK}"
+
+# ---- Set up daily backup cron job (runs on rishi-1 only, which is where
+#      this script executes). The backup container runs as a one-off
+#      `docker run` on the per-project overlay network so it can reach
+#      HAProxy by service name. Swarm stack deployment can't be used for
+#      the backup because adding a 4th compose file with an overlay
+#      reference causes a Docker naming conflict for long stack names.
+if [ -n "${BACKUP_S3_ACCESS_KEY:-}" ] && [ -n "${BACKUP_S3_SECRET_KEY:-}" ]; then
+    BACKUP_IMAGE="${IMAGE_REPO}-backup:${IMAGE_TAG}"
+    PG_PASS=$(cat /run/secrets/${SWARM_STACK}_postgres_password 2>/dev/null || \
+              docker secret inspect ${SWARM_STACK}_postgres_password --format '{{.Spec.Data}}' 2>/dev/null | base64 -d || \
+              echo "${POSTGRES_PASSWORD}")
+
+    # Build the docker run command for the cron entry
+    BACKUP_CMD="docker run --rm --network ${OVERLAY_NETWORK}"
+    BACKUP_CMD="${BACKUP_CMD} -e PGHOST=haproxy-rishi-1 -e PGPORT=5432 -e PGUSER=postgres"
+    BACKUP_CMD="${BACKUP_CMD} -e PGPASSWORD='${PG_PASS}'"
+    BACKUP_CMD="${BACKUP_CMD} -e POSTGRES_DB=${POSTGRES_DB}"
+    BACKUP_CMD="${BACKUP_CMD} -e PROJECT_REPO=${PROJECT_REPO}"
+    BACKUP_CMD="${BACKUP_CMD} -e BACKUP_S3_ENDPOINT=${BACKUP_S3_ENDPOINT}"
+    BACKUP_CMD="${BACKUP_CMD} -e BACKUP_S3_BUCKET=${BACKUP_S3_BUCKET}"
+    BACKUP_CMD="${BACKUP_CMD} -e BACKUP_RETENTION_DAILY=${BACKUP_RETENTION_DAILY:-7}"
+    BACKUP_CMD="${BACKUP_CMD} -e BACKUP_RETENTION_WEEKLY=${BACKUP_RETENTION_WEEKLY:-4}"
+    BACKUP_CMD="${BACKUP_CMD} -e AWS_ACCESS_KEY_ID='${BACKUP_S3_ACCESS_KEY}'"
+    BACKUP_CMD="${BACKUP_CMD} -e AWS_SECRET_ACCESS_KEY='${BACKUP_S3_SECRET_KEY}'"
+    BACKUP_CMD="${BACKUP_CMD} ${BACKUP_IMAGE}"
+
+    # Idempotent cron entry: remove any existing entry for this project, add new one.
+    # Runs daily at 3:00 AM UTC. Logs go to Docker's logging driver (captured by
+    # `docker logs` on the container if it's still running, or lost after --rm).
+    CRON_TAG="# ${PROJECT_REPO}_daily_backup"
+    (crontab -l 2>/dev/null | grep -v "${CRON_TAG}"; \
+     echo "0 3 * * * ${BACKUP_CMD} ${CRON_TAG}") | crontab -
+    echo "==> Daily backup cron installed (3:00 AM UTC via docker run on ${OVERLAY_NETWORK})"
+else
+    echo "==> Backup S3 credentials not set — skipping backup cron setup"
+fi
