@@ -54,6 +54,7 @@ services:
 networks:
   ${OVERLAY_NETWORK}:
     external: true
+    name: ${OVERLAY_NETWORK}
 
 secrets:
   postgres_password:
