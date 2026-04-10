@@ -98,9 +98,11 @@ run_sql "CREATE TABLE IF NOT EXISTS schema_migrations (
     applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );"
 
-# Get list of already-applied migrations
-APPLIED=$(run_sql "SELECT filename FROM schema_migrations ORDER BY filename;" 2>/dev/null \
-    | grep -E '^[0-9]' || true)
+# Get list of already-applied migrations. Use -tA for tuples-only unaligned
+# output (no header, no padding) so the grep match is reliable.
+LEADER=$(find_leader) || { echo "[migrations] FATAL: no Patroni leader found"; exit 1; }
+APPLIED=$(docker exec -i "$LEADER" psql -h 127.0.0.1 -U postgres -d "${POSTGRES_DB}" -tA \
+    -c "SELECT filename FROM schema_migrations ORDER BY filename;" 2>/dev/null || true)
 
 PENDING=0
 while IFS= read -r FILE; do
