@@ -58,9 +58,18 @@ fi
 
 echo "[migrations] checking for pending migrations..."
 
+# Migrations must run on the Swarm MANAGER only (rishi-1). The manager can
+# see all Patroni containers across the cluster. Worker nodes can only see
+# their own containers and may not have the leader. Since CI deploys
+# rishi-1 first (canary), the migration runs there. rishi-2's deploy
+# skips migrations automatically — it's NOT the manager.
+if ! docker node ls >/dev/null 2>&1; then
+    echo "[migrations] not on the Swarm manager — skipping (migrations already applied by rishi-1)"
+    exit 0
+fi
+
 # Find the Patroni leader container
 find_leader() {
-    # When running on the server (via CI), find the leader container
     for C in $(docker ps -qf "name=${SWARM_STACK}_patroni-rishi" 2>/dev/null); do
         IS_LEADER=$(docker exec "$C" psql -h 127.0.0.1 -U postgres -tAc "SELECT pg_is_in_recovery();" 2>/dev/null)
         if [ "$IS_LEADER" = "f" ]; then
