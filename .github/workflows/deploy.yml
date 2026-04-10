@@ -197,7 +197,7 @@ jobs:
           host: ${{ env.SERVER_1_IP }}
           username: ${{ env.DEPLOY_USER }}
           key: ${{ secrets.HETZNER_BARE_METAL_GITHUB_ACTIONS_SSH_PRIVATE_KEY }}
-          envs: IMAGE_TAG,POSTGRES_PASSWORD,REPLICATION_PASSWORD,GITHUB_TOKEN,GITHUB_ACTOR,STACK_DIR,BACKUP_S3_ACCESS_KEY,BACKUP_S3_SECRET_KEY
+          envs: IMAGE_TAG,POSTGRES_PASSWORD,REPLICATION_PASSWORD,GITHUB_TOKEN,GITHUB_ACTOR,STACK_DIR
           script: |
             chmod +x ${STACK_DIR}/scripts/ci/deploy-db-stack.sh
             ${STACK_DIR}/scripts/ci/deploy-db-stack.sh
@@ -208,8 +208,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_ACTOR: ${{ github.actor }}
           STACK_DIR: /home/deploy/${{ env.SWARM_STACK }}-stack
-          BACKUP_S3_ACCESS_KEY: ${{ secrets.BACKUP_S3_ACCESS_KEY }}
-          BACKUP_S3_SECRET_KEY: ${{ secrets.BACKUP_S3_SECRET_KEY }}
 
   # ============================================================================
   # JOB 3: Deploy app + Caddy snippet to rishi-1 and rishi-2.

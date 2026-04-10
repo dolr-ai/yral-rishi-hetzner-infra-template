@@ -1,0 +1,66 @@
+name: Daily Database Backup
+
+on:
+  schedule:
+    # Run daily at 3:00 AM UTC
+    - cron: '0 3 * * *'
+  # Allow manual trigger from the Actions tab
+  workflow_dispatch:
+
+jobs:
+  backup:
+    name: pg_dump to Hetzner Object Storage
+    runs-on: ubuntu-latest
+    # Only run if WITH_DATABASE is true (stateless services don't need backups)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Load project.config + servers.config
+        run: |
+          grep -v '^#' project.config | grep -v '^$' >> $GITHUB_ENV
+          grep -v '^#' servers.config | grep -v '^$' >> $GITHUB_ENV
+
+      - name: Skip if stateless service
+        if: env.WITH_DATABASE == 'false'
+        run: echo "WITH_DATABASE=false — no database to back up. Exiting."
+
+      - name: Run backup via docker on rishi-1
+        if: env.WITH_DATABASE != 'false'
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ env.SERVER_1_IP }}
+          username: ${{ env.DEPLOY_USER }}
+          key: ${{ secrets.HETZNER_BARE_METAL_GITHUB_ACTIONS_SSH_PRIVATE_KEY }}
+          command_timeout: 10m
+          envs: BACKUP_S3_ACCESS_KEY,BACKUP_S3_SECRET_KEY,POSTGRES_DB,PROJECT_REPO,BACKUP_S3_ENDPOINT,BACKUP_S3_BUCKET,BACKUP_RETENTION_DAILY,BACKUP_RETENTION_WEEKLY,OVERLAY_NETWORK,SWARM_STACK,IMAGE_REPO,IMAGE_TAG
+          script: |
+            set -e
+            # Read the postgres password from the Swarm secret
+            PGPASSWORD=$(docker secret inspect ${SWARM_STACK}_postgres_password --format '{{.Spec.Data}}' 2>/dev/null | base64 -d 2>/dev/null || echo "")
+            if [ -z "$PGPASSWORD" ]; then
+              # Fallback: read from a running patroni container
+              LEADER=$(docker ps -qf "name=${SWARM_STACK}_patroni-rishi" | head -1)
+              PGPASSWORD=$(docker exec "$LEADER" cat /run/secrets/postgres_password 2>/dev/null)
+            fi
+            [ -z "$PGPASSWORD" ] && { echo "FATAL: could not read postgres password"; exit 1; }
+
+            echo "==> Running backup container on overlay network..."
+            docker run --rm \
+              --network ${OVERLAY_NETWORK} \
+              -e PGHOST=haproxy-rishi-1 \
+              -e PGPORT=5432 \
+              -e PGUSER=postgres \
+              -e PGPASSWORD="$PGPASSWORD" \
+              -e POSTGRES_DB=${POSTGRES_DB} \
+              -e PROJECT_REPO=${PROJECT_REPO} \
+              -e BACKUP_S3_ENDPOINT=${BACKUP_S3_ENDPOINT} \
+              -e BACKUP_S3_BUCKET=${BACKUP_S3_BUCKET} \
+              -e BACKUP_RETENTION_DAILY=${BACKUP_RETENTION_DAILY} \
+              -e BACKUP_RETENTION_WEEKLY=${BACKUP_RETENTION_WEEKLY} \
+              -e AWS_ACCESS_KEY_ID="${BACKUP_S3_ACCESS_KEY}" \
+              -e AWS_SECRET_ACCESS_KEY="${BACKUP_S3_SECRET_KEY}" \
+              ${IMAGE_REPO}-backup:latest
+        env:
+          BACKUP_S3_ACCESS_KEY: ${{ secrets.BACKUP_S3_ACCESS_KEY }}
+          BACKUP_S3_SECRET_KEY: ${{ secrets.BACKUP_S3_SECRET_KEY }}
+          IMAGE_TAG: latest
