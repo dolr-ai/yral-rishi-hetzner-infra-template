@@ -138,6 +138,15 @@ if [ "${HEALTHY}" = "1" ]; then
     echo "${IMAGE_TAG}" > "${LAST_GOOD_FILE}"
     echo "==> Health check passed — recorded ${IMAGE_TAG} as last good tag"
 
+    # ---- Run pending SQL migrations (if any) ----
+    if [ -d "${APP_DIR}/migrations" ] && [ -f "${APP_DIR}/scripts/ci/run-migrations.sh" ]; then
+        echo "==> Running SQL migrations..."
+        APP_DIR="${APP_DIR}" bash "${APP_DIR}/scripts/ci/run-migrations.sh" || {
+            echo "FATAL: migration failed — app is healthy but schema may be stale"
+            exit 1
+        }
+    fi
+
     # ---- Caddy snippet ----
     mkdir -p /home/deploy/caddy/conf.d
     SNIPPET_DEST="/home/deploy/caddy/conf.d/${PROJECT_REPO}.caddy"

@@ -1,0 +1,61 @@
+# Backup service — runs daily pg_dump to S3-compatible object storage.
+#
+# Deployed as part of the DB Swarm stack. Uses Swarm's restart_policy with
+# a delay to implement "run once per day" scheduling without cron. The
+# container runs backup.sh, exits 0, waits 24h, then Swarm restarts it.
+#
+# All ${VAR} interpolations come from the shell env, which
+# scripts/ci/deploy-db-stack.sh populates from project.config.
+
+version: "3.8"
+
+services:
+  backup:
+    image: ${BACKUP_IMAGE_REPO:-backup}:${IMAGE_TAG:-latest}
+    environment:
+      # Database connection — uses HAProxy on the overlay to reach the leader
+      PGHOST: "haproxy-rishi-1"
+      PGPORT: "5432"
+      PGUSER: "postgres"
+      POSTGRES_DB: ${POSTGRES_DB}
+      PROJECT_REPO: ${PROJECT_REPO}
+      # S3 config (non-secret, from project.config)
+      BACKUP_S3_ENDPOINT: ${BACKUP_S3_ENDPOINT}
+      BACKUP_S3_BUCKET: ${BACKUP_S3_BUCKET}
+      BACKUP_RETENTION_DAILY: ${BACKUP_RETENTION_DAILY:-7}
+      BACKUP_RETENTION_WEEKLY: ${BACKUP_RETENTION_WEEKLY:-4}
+      # S3 credentials (from Swarm secrets, injected by entrypoint or env)
+      AWS_ACCESS_KEY_ID: ${BACKUP_S3_ACCESS_KEY}
+      AWS_SECRET_ACCESS_KEY: ${BACKUP_S3_SECRET_KEY}
+    secrets:
+      - postgres_password
+    # Read the postgres password from the Swarm secret file
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        export PGPASSWORD=$$(cat /run/secrets/postgres_password)
+        exec /usr/local/bin/backup.sh
+    networks:
+      - ${OVERLAY_NETWORK}
+    deploy:
+      placement:
+        constraints:
+          - node.labels.server == rishi-1
+      restart_policy:
+        condition: any
+        delay: 24h        # Wait 24 hours between backup runs
+        max_attempts: 0   # Unlimited restarts (run forever)
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.5'
+
+networks:
+  ${OVERLAY_NETWORK}:
+    external: true
+
+secrets:
+  postgres_password:
+    external: true
+    name: ${SWARM_STACK}_postgres_password

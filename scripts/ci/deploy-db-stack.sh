@@ -36,6 +36,7 @@ mv etcd/stack.yml ./etcd-stack.yml 2>/dev/null || true
 mv patroni/stack.yml ./patroni-stack.yml 2>/dev/null || true
 mv haproxy/stack.yml ./haproxy-stack.yml 2>/dev/null || true
 mv haproxy/haproxy.cfg ./haproxy.cfg 2>/dev/null || true
+mv backup/stack.yml ./backup-stack.yml 2>/dev/null || true
 
 # Login to GHCR so workers can pull images via --with-registry-auth
 echo "${GITHUB_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
@@ -68,12 +69,21 @@ fi
 # IMAGE_TAG was already exported by the CI workflow, but be explicit for clarity
 export IMAGE_TAG="${IMAGE_TAG}"
 
+# Export S3 backup credentials (passed by CI from GitHub Secrets).
+# These are env vars that the backup container reads — never written to disk.
+export BACKUP_S3_ACCESS_KEY="${BACKUP_S3_ACCESS_KEY:-}"
+export BACKUP_S3_SECRET_KEY="${BACKUP_S3_SECRET_KEY:-}"
+export BACKUP_IMAGE_REPO="${IMAGE_REPO}-backup"
+
 # Deploy (or update) the stack. Idempotent.
+# The backup stack is included only if the backup Dockerfile + stack.yml exist.
+COMPOSE_FILES="-c etcd-stack.yml -c patroni-stack.yml -c haproxy-stack.yml"
+if [ -f backup-stack.yml ]; then
+    COMPOSE_FILES="${COMPOSE_FILES} -c backup-stack.yml"
+fi
 docker stack deploy \
     --with-registry-auth \
-    --compose-file etcd-stack.yml \
-    --compose-file patroni-stack.yml \
-    --compose-file haproxy-stack.yml \
+    ${COMPOSE_FILES} \
     "${SWARM_STACK}"
 
 echo ""

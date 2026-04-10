@@ -111,6 +111,16 @@ jobs:
           exit-code: "0"          # HIGH is too noisy to break builds; surface only
           ignore-unfixed: true
 
+      - name: Build and push backup image
+        if: needs.config.outputs.with_database == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backup
+          push: true
+          tags: |
+            ${{ env.IMAGE_REPO }}-backup:latest
+            ${{ env.IMAGE_REPO }}-backup:${{ github.sha }}
+
       - name: Build and push Patroni image
         if: needs.config.outputs.with_database == 'true'
         uses: docker/build-push-action@v6
@@ -148,7 +158,7 @@ jobs:
           host: ${{ env.SERVER_1_IP }}
           username: ${{ env.DEPLOY_USER }}
           key: ${{ secrets.HETZNER_BARE_METAL_GITHUB_ACTIONS_SSH_PRIVATE_KEY }}
-          source: "etcd/stack.yml,patroni/stack.yml,haproxy/stack.yml,haproxy/haproxy.cfg,scripts/ci/deploy-db-stack.sh,project.config"
+          source: "etcd/stack.yml,patroni/stack.yml,haproxy/stack.yml,haproxy/haproxy.cfg,backup/stack.yml,scripts/ci/deploy-db-stack.sh,project.config"
           target: /home/deploy/${{ env.SWARM_STACK }}-stack
 
       - name: Pre-pull Patroni image on Server 1
@@ -187,7 +197,7 @@ jobs:
           host: ${{ env.SERVER_1_IP }}
           username: ${{ env.DEPLOY_USER }}
           key: ${{ secrets.HETZNER_BARE_METAL_GITHUB_ACTIONS_SSH_PRIVATE_KEY }}
-          envs: IMAGE_TAG,POSTGRES_PASSWORD,REPLICATION_PASSWORD,GITHUB_TOKEN,GITHUB_ACTOR,STACK_DIR
+          envs: IMAGE_TAG,POSTGRES_PASSWORD,REPLICATION_PASSWORD,GITHUB_TOKEN,GITHUB_ACTOR,STACK_DIR,BACKUP_S3_ACCESS_KEY,BACKUP_S3_SECRET_KEY
           script: |
             chmod +x ${STACK_DIR}/scripts/ci/deploy-db-stack.sh
             ${STACK_DIR}/scripts/ci/deploy-db-stack.sh
@@ -198,6 +208,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_ACTOR: ${{ github.actor }}
           STACK_DIR: /home/deploy/${{ env.SWARM_STACK }}-stack
+          BACKUP_S3_ACCESS_KEY: ${{ secrets.BACKUP_S3_ACCESS_KEY }}
+          BACKUP_S3_SECRET_KEY: ${{ secrets.BACKUP_S3_SECRET_KEY }}
 
   # ============================================================================
   # JOB 3: Deploy app + Caddy snippet to rishi-1 and rishi-2.
@@ -238,7 +250,7 @@ jobs:
           host: ${{ env.SERVER_1_IP }}
           username: ${{ env.DEPLOY_USER }}
           key: ${{ secrets.HETZNER_BARE_METAL_GITHUB_ACTIONS_SSH_PRIVATE_KEY }}
-          source: "docker-compose.yml,caddy/snippet.caddy.template,scripts/ci/deploy-app.sh,project.config"
+          source: "docker-compose.yml,caddy/snippet.caddy.template,scripts/ci/deploy-app.sh,scripts/ci/run-migrations.sh,migrations,project.config"
           target: /home/deploy/${{ env.PROJECT_REPO }}
 
       - name: Deploy + verify + auto-rollback on Server 1 (canary)
@@ -267,7 +279,7 @@ jobs:
           host: ${{ env.SERVER_2_IP }}
           username: ${{ env.DEPLOY_USER }}
           key: ${{ secrets.HETZNER_BARE_METAL_GITHUB_ACTIONS_SSH_PRIVATE_KEY }}
-          source: "docker-compose.yml,caddy/snippet.caddy.template,scripts/ci/deploy-app.sh,project.config"
+          source: "docker-compose.yml,caddy/snippet.caddy.template,scripts/ci/deploy-app.sh,scripts/ci/run-migrations.sh,migrations,project.config"
           target: /home/deploy/${{ env.PROJECT_REPO }}
 
       - name: Deploy + verify + auto-rollback on Server 2
