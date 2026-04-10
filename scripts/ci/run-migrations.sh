@@ -108,12 +108,13 @@ while IFS= read -r FILE; do
 
     # Run inside a transaction — if any statement fails, the whole
     # migration rolls back and we exit 1 (canary deploy catches this)
+    LEADER=$(find_leader) || { echo "[migrations] FATAL: no Patroni leader found"; exit 1; }
     {
         echo "BEGIN;"
         cat "$FILE"
         echo "INSERT INTO schema_migrations (filename) VALUES ('${BASENAME}');"
         echo "COMMIT;"
-    } | run_sql "-" 2>&1
+    } | docker exec -i "$LEADER" psql -h 127.0.0.1 -U postgres -d "${POSTGRES_DB}" -v ON_ERROR_STOP=1 2>&1
 
     if [ $? -ne 0 ]; then
         echo "[migrations] FATAL: migration ${BASENAME} failed — transaction rolled back"
