@@ -51,11 +51,11 @@ services:
           memory: 256M
           cpus: '0.5'
 
-networks:
-  ${OVERLAY_NETWORK}:
-    driver: overlay
-    attachable: true
-    name: ${OVERLAY_NETWORK}
+# NOTE: the overlay network is declared in patroni/stack.yml (which is
+# deployed in the SAME docker stack deploy command). We reference it by
+# key name in the service block above — no need to redeclare it here.
+# Redeclaring it caused a Docker merge conflict that tried to create a
+# stack-prefixed duplicate network exceeding the 63-char name limit.
 
 secrets:
   postgres_password:
