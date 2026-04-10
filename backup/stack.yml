@@ -4,6 +4,16 @@
 # a delay to implement "run once per day" scheduling without cron. The
 # container runs backup.sh, exits 0, waits 24h, then Swarm restarts it.
 #
+# NETWORK: the backup container does NOT join the per-project overlay network
+# explicitly. Instead, it uses the Swarm stack's default network (which all
+# services in the same stack share automatically). HAProxy is in the same
+# stack, so `haproxy-rishi-1:5432` resolves via the default network's DNS.
+#
+# WHY NOT the overlay? Adding a 4th compose file that references the overlay
+# caused Docker Swarm to try creating a stack-prefixed duplicate network
+# (>63 chars). This is a Docker bug/limitation with long stack names.
+# The default network sidesteps it entirely.
+#
 # All ${VAR} interpolations come from the shell env, which
 # scripts/ci/deploy-db-stack.sh populates from project.config.
 
@@ -13,49 +23,37 @@ services:
   backup:
     image: ${BACKUP_IMAGE_REPO:-backup}:${IMAGE_TAG:-latest}
     environment:
-      # Database connection — uses HAProxy on the overlay to reach the leader
       PGHOST: "haproxy-rishi-1"
       PGPORT: "5432"
       PGUSER: "postgres"
       POSTGRES_DB: ${POSTGRES_DB}
       PROJECT_REPO: ${PROJECT_REPO}
-      # S3 config (non-secret, from project.config)
       BACKUP_S3_ENDPOINT: ${BACKUP_S3_ENDPOINT}
       BACKUP_S3_BUCKET: ${BACKUP_S3_BUCKET}
       BACKUP_RETENTION_DAILY: ${BACKUP_RETENTION_DAILY:-7}
       BACKUP_RETENTION_WEEKLY: ${BACKUP_RETENTION_WEEKLY:-4}
-      # S3 credentials (from Swarm secrets, injected by entrypoint or env)
       AWS_ACCESS_KEY_ID: ${BACKUP_S3_ACCESS_KEY}
       AWS_SECRET_ACCESS_KEY: ${BACKUP_S3_SECRET_KEY}
     secrets:
       - postgres_password
-    # Read the postgres password from the Swarm secret file
     entrypoint:
       - /bin/bash
       - -c
       - |
         export PGPASSWORD=$$(cat /run/secrets/postgres_password)
         exec /usr/local/bin/backup.sh
-    networks:
-      - ${OVERLAY_NETWORK}
     deploy:
       placement:
         constraints:
           - node.labels.server == rishi-1
       restart_policy:
         condition: any
-        delay: 24h        # Wait 24 hours between backup runs
-        max_attempts: 0   # Unlimited restarts (run forever)
+        delay: 24h
+        max_attempts: 0
       resources:
         limits:
           memory: 256M
           cpus: '0.5'
-
-# NOTE: the overlay network is declared in patroni/stack.yml (which is
-# deployed in the SAME docker stack deploy command). We reference it by
-# key name in the service block above — no need to redeclare it here.
-# Redeclaring it caused a Docker merge conflict that tried to create a
-# stack-prefixed duplicate network exceeding the 63-char name limit.
 
 secrets:
   postgres_password:
