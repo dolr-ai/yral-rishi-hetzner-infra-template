@@ -1,14 +1,12 @@
--- Creates the counter table in this project's database.
--- (DB name comes from POSTGRES_DB in project.config — see patroni/post_init.sh.)
--- This runs ONCE via post_init.sh on the primary after first bootstrap.
+-- Bootstrap infrastructure for the migration framework.
+-- This runs ONCE via post_init.sh on the primary after first Patroni bootstrap.
+--
+-- IMPORTANT: this file creates ONLY the schema_migrations tracking table.
+-- All business-logic schema (tables, indexes, etc.) lives in migrations/*.sql
+-- and is applied by scripts/ci/run-migrations.sh. This separation makes
+-- migrations/ the single source of truth for the database schema.
 
-CREATE TABLE IF NOT EXISTS counter (
-    id    INTEGER PRIMARY KEY,
-    value BIGINT NOT NULL DEFAULT 0
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    filename VARCHAR(255) PRIMARY KEY,
+    applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-
--- The single counter row. Starts at 0.
--- First visitor triggers: UPDATE value = 0 + 1 → returns 1. Correct.
--- WHY BIGINT: can count up to 9.2 quintillion visitors. No overflow ever.
--- ON CONFLICT DO NOTHING makes this idempotent in case bootstrap retries.
-INSERT INTO counter (id, value) VALUES (1, 0) ON CONFLICT (id) DO NOTHING;

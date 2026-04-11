@@ -88,8 +88,34 @@ else
     echo "==> Created database: ${POSTGRES_DB}"
 fi
 
-# 5. Run init.sql in the project database (init.sql itself uses IF NOT EXISTS
-#    and ON CONFLICT DO NOTHING, so it's also idempotent)
+# 5. Run init.sql to create the schema_migrations tracking table, then
+#    apply all migration files to bring the fresh database to the latest
+#    schema. This makes migrations/ the single source of truth — init.sql
+#    only sets up the migration framework's own infrastructure.
 APP_CONN="${CONN/dbname=postgres/dbname=${POSTGRES_DB}}"
 psql "$APP_CONN" -f /scripts/init.sql
-echo "==> init.sql applied. Bootstrap complete."
+echo "==> schema_migrations table created"
+
+# Apply all migration files in order (same logic as run-migrations.sh but
+# using the local psql connection instead of docker exec, since we're
+# already inside the Patroni container during bootstrap).
+if [ -d /scripts/migrations ]; then
+    for MIGRATION in $(find /scripts/migrations -name '*.sql' ! -name '*.down.sql' -type f | sort); do
+        BASENAME=$(basename "$MIGRATION")
+        # Skip if already applied (idempotent)
+        ALREADY=$(psql "$APP_CONN" -tAc "SELECT 1 FROM schema_migrations WHERE filename = '${BASENAME}';" 2>/dev/null || echo "")
+        if [ "$ALREADY" = "1" ]; then
+            echo "    ${BASENAME}: already applied (skip)"
+            continue
+        fi
+        echo "    applying: ${BASENAME}"
+        psql "$APP_CONN" -v ON_ERROR_STOP=1 <<SQL
+BEGIN;
+$(cat "$MIGRATION")
+INSERT INTO schema_migrations (filename) VALUES ('${BASENAME}');
+COMMIT;
+SQL
+        echo "    ✓ ${BASENAME}"
+    done
+fi
+echo "==> Bootstrap complete. All migrations applied."

@@ -36,10 +36,14 @@ RUN mkdir -p /data/patroni /scripts && \
     chmod 0700 /data/patroni
 
 # Copy config and scripts
-COPY patroni.yml /etc/patroni.yml
-COPY init.sql /scripts/init.sql
-COPY post_init.sh /scripts/post_init.sh
-COPY entrypoint.sh /entrypoint.sh
+# NOTE: this Dockerfile is built with context=. (repo root), not context=./patroni.
+# This lets us COPY both patroni/* files and the migrations/ directory.
+COPY patroni/patroni.yml /etc/patroni.yml
+COPY patroni/init.sql /scripts/init.sql
+COPY patroni/post_init.sh /scripts/post_init.sh
+COPY patroni/entrypoint.sh /entrypoint.sh
+# Migration files so post_init.sh can bootstrap a fresh cluster to the latest schema
+COPY migrations/ /scripts/migrations/
 RUN chmod +x /scripts/post_init.sh /entrypoint.sh
 
 # Run as postgres user (never as root)

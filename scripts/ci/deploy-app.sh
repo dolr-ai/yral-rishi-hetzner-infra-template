@@ -83,7 +83,26 @@ if [ "${WITH_DATABASE:-true}" = "true" ]; then
 fi
 
 # ----------------------------------------------------------------------
-# 3. Pull and start the NEW image
+# 3. Run pending SQL migrations BEFORE starting the new app container
+# ----------------------------------------------------------------------
+# WHY BEFORE, NOT AFTER?
+# If migrations ran after the new app starts, there's a window where the
+# new code expects columns/tables that don't exist yet → app crashes.
+# By running migrations first (against the old running app), we "expand"
+# the schema to include everything the new code needs. The old app doesn't
+# use the new columns, so it keeps working. The new app starts and finds
+# everything it needs already in place. This is the "expand-contract"
+# pattern for zero-downtime schema changes.
+if [ -d "${APP_DIR}/migrations" ] && [ -f "${APP_DIR}/scripts/ci/run-migrations.sh" ]; then
+    echo "==> Running SQL migrations (before deploying new app code)..."
+    APP_DIR="${APP_DIR}" bash "${APP_DIR}/scripts/ci/run-migrations.sh" || {
+        echo "FATAL: migration failed — NOT deploying new app code"
+        exit 1
+    }
+fi
+
+# ----------------------------------------------------------------------
+# 4. Pull and start the NEW image
 # ----------------------------------------------------------------------
 SENTRY_DSN="${SENTRY_DSN}" docker compose pull
 SENTRY_DSN="${SENTRY_DSN}" docker compose up -d
@@ -137,15 +156,6 @@ fi
 if [ "${HEALTHY}" = "1" ]; then
     echo "${IMAGE_TAG}" > "${LAST_GOOD_FILE}"
     echo "==> Health check passed — recorded ${IMAGE_TAG} as last good tag"
-
-    # ---- Run pending SQL migrations (if any) ----
-    if [ -d "${APP_DIR}/migrations" ] && [ -f "${APP_DIR}/scripts/ci/run-migrations.sh" ]; then
-        echo "==> Running SQL migrations..."
-        APP_DIR="${APP_DIR}" bash "${APP_DIR}/scripts/ci/run-migrations.sh" || {
-            echo "FATAL: migration failed — app is healthy but schema may be stale"
-            exit 1
-        }
-    fi
 
     # ---- Caddy snippet ----
     mkdir -p /home/deploy/caddy/conf.d
