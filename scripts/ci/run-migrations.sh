@@ -9,30 +9,14 @@
 #   APP_DIR=/path/to/repo bash scripts/ci/run-migrations.sh           # apply
 #   APP_DIR=/path/to/repo bash scripts/ci/run-migrations.sh --dry-run # preview
 #
-# How it works:
-#   1. Creates a `schema_migrations` tracking table (if not exists)
-#   2. Lists all .sql files in migrations/ sorted by name
-#   3. For each file not yet recorded in schema_migrations:
-#      a. Sets lock_timeout = 5s (fail fast instead of blocking queries)
-#      b. Runs it inside a transaction (BEGIN...COMMIT)
-#      c. Records the filename + timestamp in schema_migrations
-#      d. If it fails, the transaction rolls back and the script exits 1
-#   4. Reports what was applied
-#
 # IMPORTANT — expand-contract discipline:
 #   Migrations run while the OLD app code is still serving traffic.
 #   Every migration must be backward-compatible with the current code.
 #   See MIGRATIONS.md for the rules.
-#
-# Required env vars:
-#   APP_DIR or REPO_ROOT  — path to the repo (to find migrations/)
-#   POSTGRES_DB           — from project.config
-#   SWARM_STACK           — from project.config (to find the Patroni leader)
 # =============================================================================
 
 set -euo pipefail
 
-# Parse args
 DRY_RUN="false"
 for arg in "$@"; do
     case "$arg" in
@@ -40,7 +24,7 @@ for arg in "$@"; do
     esac
 done
 
-# Determine where the migrations directory is
+# Determine migrations directory
 if [ -n "${APP_DIR:-}" ]; then
     MIGRATIONS_DIR="${APP_DIR}/migrations"
     if [ -z "${POSTGRES_DB:-}" ] && [ -f "${APP_DIR}/project.config" ]; then
@@ -57,7 +41,6 @@ if [ ! -d "${MIGRATIONS_DIR}" ]; then
     exit 0
 fi
 
-# Only include forward migrations (*.sql but NOT *.down.sql)
 MIGRATION_FILES=$(find "${MIGRATIONS_DIR}" -name '*.sql' ! -name '*.down.sql' -type f | sort)
 if [ -z "${MIGRATION_FILES}" ]; then
     echo "[migrations] no .sql files in migrations/ — skipping"
@@ -66,43 +49,47 @@ fi
 
 echo "[migrations] checking for pending migrations..."
 
-# Migrations must run on the Swarm MANAGER only (rishi-1). Workers skip.
+# Only run on the Swarm MANAGER (rishi-1). Workers auto-skip.
 if ! docker node ls >/dev/null 2>&1; then
     echo "[migrations] not on the Swarm manager — skipping (applied by rishi-1)"
     exit 0
 fi
 
-# Find the Patroni leader container. On first deploy the cluster may still
-# be bootstrapping (leader election takes ~30s), so we retry for up to 90s.
-find_leader() {
-    for C in $(docker ps -qf "name=${SWARM_STACK}_patroni-rishi" 2>/dev/null); do
-        IS_LEADER=$(docker exec "$C" psql -h 127.0.0.1 -U postgres -tAc "SELECT pg_is_in_recovery();" 2>/dev/null)
-        if [ "$IS_LEADER" = "f" ]; then
-            echo "$C"
-            return 0
-        fi
-    done
-    return 1
+# Find ANY local Patroni container to use as a psql client. We connect
+# THROUGH HAProxy (which routes to the leader) rather than trying to
+# docker-exec into the leader directly — because the leader might be on
+# rishi-2 or rishi-3, and docker ps only shows local containers.
+HAPROXY_HOST="haproxy-rishi-1"
+
+find_local_patroni() {
+    docker ps -qf "name=${SWARM_STACK}_patroni-rishi" 2>/dev/null | head -1
 }
 
-wait_for_leader() {
-    echo "[migrations] waiting for Patroni leader (up to 90s)..."
-    for i in $(seq 1 30); do
-        LEADER=$(find_leader 2>/dev/null) && { echo "[migrations] leader found after $((i*3))s"; return 0; }
+wait_for_db() {
+    echo "[migrations] waiting for database via HAProxy (up to 120s)..."
+    for i in $(seq 1 40); do
+        LOCAL_C=$(find_local_patroni)
+        if [ -n "$LOCAL_C" ]; then
+            if docker exec "$LOCAL_C" psql -h "${HAPROXY_HOST}" -U postgres -d "${POSTGRES_DB}" -tAc "SELECT 1;" >/dev/null 2>&1; then
+                echo "[migrations] database reachable via HAProxy after $((i*3))s"
+                return 0
+            fi
+        fi
         sleep 3
     done
-    echo "[migrations] FATAL: no Patroni leader found after 90s"
+    echo "[migrations] FATAL: database not reachable via HAProxy after 120s"
     return 1
 }
 
 run_sql() {
     local sql="$1"
-    LEADER=$(find_leader) || { echo "[migrations] FATAL: no Patroni leader found"; exit 1; }
-    docker exec -i "$LEADER" psql -h 127.0.0.1 -U postgres -d "${POSTGRES_DB}" -v ON_ERROR_STOP=1 <<< "$sql"
+    LOCAL_C=$(find_local_patroni)
+    [ -z "$LOCAL_C" ] && { echo "[migrations] FATAL: no local Patroni container"; exit 1; }
+    docker exec -i "$LOCAL_C" psql -h "${HAPROXY_HOST}" -U postgres -d "${POSTGRES_DB}" -v ON_ERROR_STOP=1 <<< "$sql"
 }
 
-# Wait for a leader before doing anything (first deploy may still be bootstrapping)
-wait_for_leader || exit 1
+# Wait for DB to be reachable (first deploy: Patroni bootstrapping)
+wait_for_db || exit 1
 
 # Create the tracking table (idempotent)
 run_sql "CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -110,9 +97,9 @@ run_sql "CREATE TABLE IF NOT EXISTS schema_migrations (
     applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );"
 
-# Get already-applied migrations (-tA = tuples-only, unaligned)
-LEADER=$(find_leader) || { echo "[migrations] FATAL: no Patroni leader found"; exit 1; }
-APPLIED=$(docker exec -i "$LEADER" psql -h 127.0.0.1 -U postgres -d "${POSTGRES_DB}" -tA \
+# Get already-applied migrations
+LOCAL_C=$(find_local_patroni)
+APPLIED=$(docker exec -i "$LOCAL_C" psql -h "${HAPROXY_HOST}" -U postgres -d "${POSTGRES_DB}" -tA \
     -c "SELECT filename FROM schema_migrations ORDER BY filename;" 2>/dev/null || true)
 
 PENDING=0
@@ -120,7 +107,6 @@ while IFS= read -r FILE; do
     [ -z "$FILE" ] && continue
     BASENAME=$(basename "$FILE")
 
-    # Skip if already applied
     if echo "$APPLIED" | grep -qF "$BASENAME"; then
         continue
     fi
@@ -134,19 +120,14 @@ while IFS= read -r FILE; do
 
     echo "[migrations] applying: ${BASENAME}"
 
-    # Run inside a transaction with a 5-second lock timeout.
-    # If the migration needs an exclusive lock (ALTER TABLE) and can't
-    # acquire it within 5s (because a query is running), the migration
-    # fails fast instead of blocking all queries. The deploy halts and
-    # the canary catches it.
-    LEADER=$(find_leader) || { echo "[migrations] FATAL: no Patroni leader found"; exit 1; }
+    LOCAL_C=$(find_local_patroni)
     {
         echo "BEGIN;"
         echo "SET lock_timeout = '5s';"
         cat "$FILE"
         echo "INSERT INTO schema_migrations (filename) VALUES ('${BASENAME}');"
         echo "COMMIT;"
-    } | docker exec -i "$LEADER" psql -h 127.0.0.1 -U postgres -d "${POSTGRES_DB}" -v ON_ERROR_STOP=1 2>&1
+    } | docker exec -i "$LOCAL_C" psql -h "${HAPROXY_HOST}" -U postgres -d "${POSTGRES_DB}" -v ON_ERROR_STOP=1 2>&1
 
     if [ $? -ne 0 ]; then
         echo "[migrations] FATAL: ${BASENAME} failed — transaction rolled back, deploy halted"
