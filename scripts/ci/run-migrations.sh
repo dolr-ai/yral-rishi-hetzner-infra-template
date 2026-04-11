@@ -72,7 +72,8 @@ if ! docker node ls >/dev/null 2>&1; then
     exit 0
 fi
 
-# Find the Patroni leader container
+# Find the Patroni leader container. On first deploy the cluster may still
+# be bootstrapping (leader election takes ~30s), so we retry for up to 90s.
 find_leader() {
     for C in $(docker ps -qf "name=${SWARM_STACK}_patroni-rishi" 2>/dev/null); do
         IS_LEADER=$(docker exec "$C" psql -h 127.0.0.1 -U postgres -tAc "SELECT pg_is_in_recovery();" 2>/dev/null)
@@ -84,11 +85,24 @@ find_leader() {
     return 1
 }
 
+wait_for_leader() {
+    echo "[migrations] waiting for Patroni leader (up to 90s)..."
+    for i in $(seq 1 30); do
+        LEADER=$(find_leader 2>/dev/null) && { echo "[migrations] leader found after $((i*3))s"; return 0; }
+        sleep 3
+    done
+    echo "[migrations] FATAL: no Patroni leader found after 90s"
+    return 1
+}
+
 run_sql() {
     local sql="$1"
     LEADER=$(find_leader) || { echo "[migrations] FATAL: no Patroni leader found"; exit 1; }
     docker exec -i "$LEADER" psql -h 127.0.0.1 -U postgres -d "${POSTGRES_DB}" -v ON_ERROR_STOP=1 <<< "$sql"
 }
+
+# Wait for a leader before doing anything (first deploy may still be bootstrapping)
+wait_for_leader || exit 1
 
 # Create the tracking table (idempotent)
 run_sql "CREATE TABLE IF NOT EXISTS schema_migrations (
