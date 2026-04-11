@@ -70,7 +70,8 @@ wait_for_db() {
     for i in $(seq 1 40); do
         LOCAL_C=$(find_local_patroni)
         if [ -n "$LOCAL_C" ]; then
-            if docker exec "$LOCAL_C" psql -h "${HAPROXY_HOST}" -U postgres -d "${POSTGRES_DB}" -tAc "SELECT 1;" >/dev/null 2>&1; then
+            PG_PASS=$(docker exec "$LOCAL_C" cat /run/secrets/postgres_password 2>/dev/null || echo "")
+            if docker exec -e PGPASSWORD="$PG_PASS" "$LOCAL_C" psql -h "${HAPROXY_HOST}" -U postgres -d "${POSTGRES_DB}" -tAc "SELECT 1;" >/dev/null 2>&1; then
                 echo "[migrations] database reachable via HAProxy after $((i*3))s"
                 return 0
             fi
@@ -85,7 +86,10 @@ run_sql() {
     local sql="$1"
     LOCAL_C=$(find_local_patroni)
     [ -z "$LOCAL_C" ] && { echo "[migrations] FATAL: no local Patroni container"; exit 1; }
-    docker exec -i "$LOCAL_C" psql -h "${HAPROXY_HOST}" -U postgres -d "${POSTGRES_DB}" -v ON_ERROR_STOP=1 <<< "$sql"
+    # HAProxy is a remote connection → md5 auth → needs PGPASSWORD.
+    # Read it from the Swarm secret mounted inside the Patroni container.
+    docker exec -i -e PGPASSWORD="$(docker exec "$LOCAL_C" cat /run/secrets/postgres_password 2>/dev/null)" \
+        "$LOCAL_C" psql -h "${HAPROXY_HOST}" -U postgres -d "${POSTGRES_DB}" -v ON_ERROR_STOP=1 <<< "$sql"
 }
 
 # Wait for DB to be reachable (first deploy: Patroni bootstrapping)
@@ -99,7 +103,8 @@ run_sql "CREATE TABLE IF NOT EXISTS schema_migrations (
 
 # Get already-applied migrations
 LOCAL_C=$(find_local_patroni)
-APPLIED=$(docker exec -i "$LOCAL_C" psql -h "${HAPROXY_HOST}" -U postgres -d "${POSTGRES_DB}" -tA \
+PG_PASS=$(docker exec "$LOCAL_C" cat /run/secrets/postgres_password 2>/dev/null || echo "")
+APPLIED=$(docker exec -i -e PGPASSWORD="$PG_PASS" "$LOCAL_C" psql -h "${HAPROXY_HOST}" -U postgres -d "${POSTGRES_DB}" -tA \
     -c "SELECT filename FROM schema_migrations ORDER BY filename;" 2>/dev/null || true)
 
 PENDING=0
@@ -121,13 +126,14 @@ while IFS= read -r FILE; do
     echo "[migrations] applying: ${BASENAME}"
 
     LOCAL_C=$(find_local_patroni)
+    PG_PASS=$(docker exec "$LOCAL_C" cat /run/secrets/postgres_password 2>/dev/null || echo "")
     {
         echo "BEGIN;"
         echo "SET lock_timeout = '5s';"
         cat "$FILE"
         echo "INSERT INTO schema_migrations (filename) VALUES ('${BASENAME}');"
         echo "COMMIT;"
-    } | docker exec -i "$LOCAL_C" psql -h "${HAPROXY_HOST}" -U postgres -d "${POSTGRES_DB}" -v ON_ERROR_STOP=1 2>&1
+    } | docker exec -i -e PGPASSWORD="$PG_PASS" "$LOCAL_C" psql -h "${HAPROXY_HOST}" -U postgres -d "${POSTGRES_DB}" -v ON_ERROR_STOP=1 2>&1
 
     if [ $? -ne 0 ]; then
         echo "[migrations] FATAL: ${BASENAME} failed — transaction rolled back, deploy halted"
