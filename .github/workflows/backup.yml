@@ -1,49 +1,111 @@
+# ---------------------------------------------------------------------------
+# backup.yml — GitHub Actions workflow that runs a daily database backup.
+#
+# WHAT IS A GITHUB ACTIONS WORKFLOW?
+# A YAML file that tells GitHub to run commands automatically on certain
+# triggers (schedule, push, manual). GitHub runs these commands on a
+# temporary server (called a "runner") in the cloud.
+#
+# WHAT DOES THIS WORKFLOW DO?
+# 1. SSHes into rishi-1 (our Swarm manager server)
+# 2. Runs the backup Docker container on the database overlay network
+# 3. The container: pg_dump → gzip → upload to Hetzner Object Storage
+#
+# WHEN DOES IT RUN?
+# - Every day at 3:00 AM UTC (automatic, via the "schedule" trigger)
+# - Manually via the GitHub Actions tab or: gh workflow run backup.yml
+#
+# WHERE DO BACKUPS GO?
+# s3://rishi-yral/<PROJECT_REPO>/daily/YYYY-MM-DD_HHMMSS.sql.gz
+# Each service has its own folder (PROJECT_REPO) — no mixing.
+# ---------------------------------------------------------------------------
+
+# The name shown in the GitHub Actions UI
 name: Daily Database Backup
 
+# TRIGGERS: when should this workflow run?
 on:
   schedule:
-    # Run daily at 3:00 AM UTC
+    # Cron expression: minute hour day-of-month month day-of-week
+    # "0 3 * * *" = at minute 0, hour 3, every day, every month, every weekday
+    # = 3:00 AM UTC daily
     - cron: '0 3 * * *'
-  # Allow manual trigger from the Actions tab
+
+  # Also allow manual trigger from the GitHub Actions tab (or gh CLI)
   workflow_dispatch:
 
+# JOBS: the actual work to do
 jobs:
   backup:
+    # The name shown in the Actions UI for this job
     name: pg_dump to Hetzner Object Storage
+
+    # Run on GitHub's Ubuntu runner (a temporary cloud server)
     runs-on: ubuntu-latest
-    # Only run if WITH_DATABASE is true (stateless services don't need backups)
+
     steps:
+      # Step 1: check out the repo (so we can read project.config + servers.config)
       - uses: actions/checkout@v4
 
+      # Step 2: load project.config and servers.config into environment variables
+      # "grep -v '^#'" removes comment lines
+      # "grep -v '^$'" removes empty lines
+      # ">> $GITHUB_ENV" adds each KEY=value line to GitHub's environment
+      # so subsequent steps can use ${{ env.KEY }}
       - name: Load project.config + servers.config
         run: |
           grep -v '^#' project.config | grep -v '^$' >> $GITHUB_ENV
           grep -v '^#' servers.config | grep -v '^$' >> $GITHUB_ENV
 
+      # Step 3: skip the entire backup if this is a stateless service
+      # (no database = nothing to back up)
       - name: Skip if stateless service
         if: env.WITH_DATABASE == 'false'
         run: echo "WITH_DATABASE=false — no database to back up. Exiting."
 
+      # Step 4: SSH into rishi-1 and run the backup container
       - name: Run backup via docker on rishi-1
+        # Only run if the service HAS a database
         if: env.WITH_DATABASE != 'false'
+
+        # appleboy/ssh-action: a GitHub Action that SSHes into a server
+        # and runs a script. It handles SSH key authentication automatically.
         uses: appleboy/ssh-action@v1.2.0
         with:
+          # Connect to rishi-1 (the Swarm manager)
           host: ${{ env.SERVER_1_IP }}
+          # Use the deploy user (non-root)
           username: ${{ env.DEPLOY_USER }}
+          # SSH private key from GitHub Secrets (encrypted)
           key: ${{ secrets.HETZNER_BARE_METAL_GITHUB_ACTIONS_SSH_PRIVATE_KEY }}
+          # Allow up to 10 minutes for the backup to complete
           command_timeout: 10m
+
+          # Which environment variables to pass to the SSH session
+          # (the SSH session runs on rishi-1, not on the GitHub runner)
           envs: BACKUP_S3_ACCESS_KEY,BACKUP_S3_SECRET_KEY,POSTGRES_DB,PROJECT_REPO,BACKUP_S3_ENDPOINT,BACKUP_S3_BUCKET,BACKUP_RETENTION_DAILY,BACKUP_RETENTION_WEEKLY,OVERLAY_NETWORK,SWARM_STACK,IMAGE_REPO,IMAGE_TAG
+
+          # The script that runs ON rishi-1 via SSH
           script: |
+            # "set -e" = stop on any error
             set -e
-            # Read the postgres password from the Swarm secret
+
+            # Read the PostgreSQL password from the Docker Swarm secret.
+            # Try two methods (the first might not work on all Docker versions):
+            #   Method 1: docker secret inspect (reads from Swarm's secret store)
+            #   Method 2: docker exec into a Patroni container and cat the file
             PGPASSWORD=$(docker secret inspect ${SWARM_STACK}_postgres_password --format '{{.Spec.Data}}' 2>/dev/null | base64 -d 2>/dev/null || echo "")
             if [ -z "$PGPASSWORD" ]; then
-              # Fallback: read from a running patroni container
               LEADER=$(docker ps -qf "name=${SWARM_STACK}_patroni-rishi" | head -1)
               PGPASSWORD=$(docker exec "$LEADER" cat /run/secrets/postgres_password 2>/dev/null)
             fi
             [ -z "$PGPASSWORD" ] && { echo "FATAL: could not read postgres password"; exit 1; }
 
+            # Run the backup container:
+            # --rm           = delete the container after it exits (cleanup)
+            # --network      = join the database overlay network (so it can reach HAProxy)
+            # -e KEY=VALUE   = set environment variables inside the container
+            # The container runs backup.sh which: pg_dump → gzip → mc upload → verify
             echo "==> Running backup container on overlay network..."
             docker run --rm \
               --network ${OVERLAY_NETWORK} \
@@ -60,6 +122,8 @@ jobs:
               -e AWS_ACCESS_KEY_ID="${BACKUP_S3_ACCESS_KEY}" \
               -e AWS_SECRET_ACCESS_KEY="${BACKUP_S3_SECRET_KEY}" \
               ${IMAGE_REPO}-backup:latest
+
+        # Map GitHub Secrets to environment variables for the SSH action
         env:
           BACKUP_S3_ACCESS_KEY: ${{ secrets.BACKUP_S3_ACCESS_KEY }}
           BACKUP_S3_SECRET_KEY: ${{ secrets.BACKUP_S3_SECRET_KEY }}
