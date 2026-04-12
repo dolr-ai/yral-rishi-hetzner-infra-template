@@ -127,7 +127,7 @@ jobs:
       # Check out the repo
       - uses: actions/checkout@v4
       # Install Python 3.12 (matches the version in our Dockerfile)
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       # Install development dependencies (pytest, linters, etc.)
