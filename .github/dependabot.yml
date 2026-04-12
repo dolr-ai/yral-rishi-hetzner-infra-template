@@ -1,18 +1,42 @@
+# ---------------------------------------------------------------------------
+# dependabot.yml — automatically checks for outdated dependencies weekly.
+#
+# WHAT IS DEPENDABOT?
+# Dependabot is a GitHub tool that scans your project's dependencies
+# (Python packages, Docker base images, GitHub Actions) and creates
+# pull requests when newer versions are available. This helps you:
+#   - Get security fixes quickly (vulnerable packages get updated)
+#   - Stay current with bug fixes and improvements
+#   - Avoid the "dependency rot" problem (years-old, unmaintained deps)
+#
+# HOW IT WORKS:
+# Every week, Dependabot checks if any of the pinned versions in
+# requirements.txt, Dockerfile, or deploy.yml have newer releases.
+# If yes, it creates a PR on GitHub titled "Bump fastapi from 0.115.12
+# to 0.116.0" which you can review and merge.
+#
+# WHY WEEKLY (NOT DAILY)?
+# Daily is too noisy — you'd get multiple PRs per day. Weekly strikes
+# a balance between staying current and not drowning in update PRs.
+# ---------------------------------------------------------------------------
+
+# Dependabot config file version (must be 2)
 version: 2
-# Dependabot config — surfaces dep updates as PRs so we don't run vulnerable
-# versions for months. Schedule is weekly to avoid alert fatigue.
+
 updates:
-  # Python deps (FastAPI, sentry-sdk, psycopg2, etc.)
-  - package-ecosystem: "pip"
-    directory: "/"
+  # ----- PYTHON PACKAGES (requirements.txt) -----
+  # Checks: fastapi, uvicorn, sentry-sdk, psycopg2-binary
+  - package-ecosystem: "pip"       # what type of dependency
+    directory: "/"                  # where to find requirements.txt
     schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 5
-    labels:
+      interval: "weekly"           # check once per week
+    open-pull-requests-limit: 5    # max 5 open PRs at once
+    labels:                        # labels added to the PRs
       - "dependencies"
       - "python"
 
-  # Dev/test deps (pytest, httpx)
+  # ----- DEV/TEST PACKAGES (requirements-dev.txt) -----
+  # Checks: pytest, httpx
   - package-ecosystem: "pip"
     directory: "/"
     target-branch: "main"
@@ -20,9 +44,11 @@ updates:
       interval: "weekly"
     open-pull-requests-limit: 3
     allow:
-      - dependency-type: "all"
+      - dependency-type: "all"     # update both direct and indirect deps
 
-  # GitHub Actions used in the workflow (checkout, build-push, scp, ssh, trivy)
+  # ----- GITHUB ACTIONS (deploy.yml, backup.yml) -----
+  # Checks: actions/checkout, docker/build-push-action, appleboy/ssh-action, etc.
+  # Important: outdated Actions can have security vulnerabilities.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
@@ -32,9 +58,10 @@ updates:
       - "dependencies"
       - "github-actions"
 
-  # Base image of the app Dockerfile (python:3.12-slim) and patroni Dockerfile
+  # ----- APP DOCKER BASE IMAGE (Dockerfile) -----
+  # Checks if python:3.12-slim has a newer patch version
   - package-ecosystem: "docker"
-    directory: "/"
+    directory: "/"                 # where to find the Dockerfile
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 3
@@ -42,8 +69,10 @@ updates:
       - "dependencies"
       - "docker"
 
+  # ----- PATRONI DOCKER BASE IMAGE (patroni/Dockerfile) -----
+  # Checks if ubuntu:22.04 has a newer version
   - package-ecosystem: "docker"
-    directory: "/patroni"
+    directory: "/patroni"          # where to find patroni/Dockerfile
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 3
