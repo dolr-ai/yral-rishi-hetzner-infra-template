@@ -1,0 +1,123 @@
+name: Infrastructure Health Check
+
+on:
+  schedule:
+    # Every 5 minutes
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+jobs:
+  health:
+    name: Check app + DB + backup health
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Load config
+        run: |
+          grep -v '^#' project.config | grep -v '^$' >> $GITHUB_ENV
+          grep -v '^#' servers.config | grep -v '^$' >> $GITHUB_ENV
+
+      - name: Skip if stateless
+        if: env.WITH_DATABASE == 'false'
+        run: echo "Stateless service — skipping DB checks"
+
+      - name: Check app health (public URL)
+        id: app
+        run: |
+          HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "https://${PROJECT_DOMAIN}/health" 2>/dev/null || echo "000")
+          echo "http_code=${HTTP_CODE}" >> $GITHUB_OUTPUT
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "✓ App healthy (HTTP 200)"
+          else
+            echo "✗ App UNHEALTHY (HTTP ${HTTP_CODE})"
+          fi
+
+      - name: Check Patroni cluster (3/3 streaming)
+        if: env.WITH_DATABASE != 'false'
+        id: patroni
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ env.SERVER_1_IP }}
+          username: ${{ env.DEPLOY_USER }}
+          key: ${{ secrets.HETZNER_BARE_METAL_GITHUB_ACTIONS_SSH_PRIVATE_KEY }}
+          script: |
+            C=$(docker ps -qf "name=${SWARM_STACK}_patroni-rishi" | head -1)
+            if [ -z "$C" ]; then
+              echo "PATRONI_STATUS=no_container" >> /tmp/health_output
+              echo "✗ No Patroni container found"
+              exit 1
+            fi
+            LIST=$(docker exec "$C" patronictl -c /etc/patroni.yml list 2>/dev/null)
+            echo "$LIST"
+            STREAMING=$(echo "$LIST" | grep -c "streaming" || true)
+            LEADER=$(echo "$LIST" | grep -c "Leader" || true)
+            FAILED=$(echo "$LIST" | grep -c "start failed" || true)
+            echo ""
+            if [ "$LEADER" -ge 1 ] && [ "$STREAMING" -ge 2 ] && [ "$FAILED" -eq 0 ]; then
+              echo "✓ Patroni healthy: ${LEADER} leader, ${STREAMING} streaming, ${FAILED} failed"
+            elif [ "$LEADER" -ge 1 ] && [ "$STREAMING" -ge 1 ]; then
+              echo "⚠ Patroni degraded: ${LEADER} leader, ${STREAMING} streaming, ${FAILED} failed"
+            else
+              echo "✗ Patroni CRITICAL: ${LEADER} leader, ${STREAMING} streaming, ${FAILED} failed"
+              exit 1
+            fi
+
+      - name: Check etcd cluster (3/3 healthy)
+        if: env.WITH_DATABASE != 'false'
+        id: etcd
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ env.SERVER_1_IP }}
+          username: ${{ env.DEPLOY_USER }}
+          key: ${{ secrets.HETZNER_BARE_METAL_GITHUB_ACTIONS_SSH_PRIVATE_KEY }}
+          script: |
+            E=$(docker ps -qf "name=${SWARM_STACK}_etcd-rishi-1" | head -1)
+            HEALTH=$(docker exec "$E" etcdctl --endpoints=http://etcd-rishi-1:2379,http://etcd-rishi-2:2379,http://etcd-rishi-3:2379 endpoint health 2>&1)
+            echo "$HEALTH"
+            HEALTHY=$(echo "$HEALTH" | grep -c "is healthy" || true)
+            if [ "$HEALTHY" -eq 3 ]; then
+              echo "✓ etcd 3/3 healthy"
+            else
+              echo "✗ etcd ${HEALTHY}/3 healthy"
+              exit 1
+            fi
+
+      - name: Check last backup age
+        if: env.WITH_DATABASE != 'false'
+        id: backup
+        run: |
+          # Check the last backup workflow run
+          LAST_RUN=$(gh run list --workflow=backup.yml --limit 1 --json conclusion,createdAt -q '.[0]' 2>/dev/null || echo '{}')
+          CONCLUSION=$(echo "$LAST_RUN" | python3 -c "import sys,json; print(json.load(sys.stdin).get('conclusion','unknown'))" 2>/dev/null)
+          CREATED=$(echo "$LAST_RUN" | python3 -c "import sys,json; print(json.load(sys.stdin).get('createdAt',''))" 2>/dev/null)
+          echo "Last backup: ${CREATED} (${CONCLUSION})"
+          if [ "$CONCLUSION" = "success" ]; then
+            echo "✓ Last backup succeeded"
+          else
+            echo "⚠ Last backup status: ${CONCLUSION}"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push to Uptime Kuma (if configured)
+        if: always()
+        run: |
+          PUSH_URL="${UPTIME_KUMA_PUSH_URL:-}"
+          if [ -z "$PUSH_URL" ]; then
+            echo "UPTIME_KUMA_PUSH_URL not set — skipping push"
+            exit 0
+          fi
+          # Determine overall status
+          APP_CODE="${{ steps.app.outputs.http_code }}"
+          if [ "$APP_CODE" = "200" ] && [ "${{ job.status }}" = "success" ]; then
+            STATUS="up"
+            MSG="All checks passed"
+          else
+            STATUS="down"
+            MSG="App=${APP_CODE} Job=${{ job.status }}"
+          fi
+          curl -fsS "${PUSH_URL}?status=${STATUS}&msg=${MSG}" --max-time 10 >/dev/null 2>&1 || true
+          echo "Pushed status=${STATUS} to Uptime Kuma"
+        env:
+          UPTIME_KUMA_PUSH_URL: ${{ secrets.UPTIME_KUMA_PUSH_URL }}

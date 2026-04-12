@@ -69,6 +69,22 @@ fi
 # IMAGE_TAG was already exported by the CI workflow, but be explicit for clarity
 export IMAGE_TAG="${IMAGE_TAG}"
 
+# Pre-create Patroni data volumes on each server with a "keep" label.
+# Docker's `docker system prune --volumes` only removes UNLABELED volumes.
+# By adding the "com.dolr-ai.keep=true" label, these volumes are protected
+# from accidental prune — the single biggest data-loss risk after disk failure.
+# The volumes are declared as `external: true` in patroni/stack.yml so
+# docker stack deploy references them by name instead of creating its own.
+for n in 1 2 3; do
+    VOL_NAME="${SWARM_STACK}_patroni-rishi-${n}-data"
+    if ! docker volume inspect "${VOL_NAME}" >/dev/null 2>&1; then
+        docker volume create --label "com.dolr-ai.keep=true" \
+            --label "com.dolr-ai.service=${PROJECT_REPO}" \
+            "${VOL_NAME}" >/dev/null
+        echo "  Created protected volume: ${VOL_NAME}"
+    fi
+done
+
 # Deploy (or update) the stack. Idempotent.
 docker stack deploy \
     --with-registry-auth \

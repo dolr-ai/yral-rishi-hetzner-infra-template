@@ -20,27 +20,43 @@ def _read_database_url() -> str:
     return os.environ["DATABASE_URL"]
 
 
-# Add TCP keepalives to detect dead connections within ~60 seconds.
-# WHY keepalives?
-# Without them, a connection can sit "open" for hours after the network path
-# died (Patroni failover, HAProxy backend swap, NAT timeout). The OS default
-# is ~2 hours before the kernel notices. With these settings:
-#   - Idle connections start sending keepalive probes after 30 seconds
-#   - Probes every 10 seconds
-#   - 3 missed probes = connection dead
-#   - Total: ~60 seconds to detect a dead connection
-DATABASE_URL = _read_database_url()
 _KEEPALIVE_OPTS = "keepalives=1&keepalives_idle=30&keepalives_interval=10&keepalives_count=3"
-DATABASE_URL = (
-    f"{DATABASE_URL}&{_KEEPALIVE_OPTS}"
-    if "?" in DATABASE_URL
-    else f"{DATABASE_URL}?{_KEEPALIVE_OPTS}"
-)
 
-# Connection pool shared across all FastAPI requests.
-# minconn=2:  keep 2 connections warm so the first request after idle is fast
-# maxconn=10: scale up to 10 under concurrent load (per app container)
-_pool = ThreadedConnectionPool(minconn=2, maxconn=10, dsn=DATABASE_URL)
+# LAZY pool initialization. The pool is NOT created at import time because:
+# 1. On first deploy, the DB may not be reachable yet (HAProxy not converged)
+# 2. A crash at import time puts the container into a restart loop that the
+#    canary deploy reports as "unhealthy" — the deploy fails even though the
+#    DB just needed a few more seconds
+# Instead, we create the pool on first request with retry. Once created, it's
+# reused for all subsequent requests (fast path = just return _pool).
+_pool = None
+_database_url = None
+
+
+def _get_pool():
+    """Return the connection pool, creating it lazily on first call."""
+    global _pool, _database_url
+    if _pool is not None:
+        return _pool
+
+    url = _read_database_url()
+    url = (
+        f"{url}&{_KEEPALIVE_OPTS}" if "?" in url else f"{url}?{_KEEPALIVE_OPTS}"
+    )
+    _database_url = url
+
+    # Retry pool creation up to 5 times with 2s backoff. This handles the
+    # first-deploy race where HAProxy hasn't converged yet.
+    import time
+    last_err = None
+    for attempt in range(5):
+        try:
+            _pool = ThreadedConnectionPool(minconn=2, maxconn=10, dsn=url)
+            return _pool
+        except OperationalError as e:
+            last_err = e
+            time.sleep(2)
+    raise last_err
 
 
 def _execute_with_retry(operation, max_attempts: int = 3):
@@ -69,7 +85,8 @@ def _execute_with_retry(operation, max_attempts: int = 3):
     """
     last_exc = None
     for attempt in range(max_attempts):
-        conn = _pool.getconn()
+        pool = _get_pool()
+        conn = pool.getconn()
         try:
             result = operation(conn)
             _pool.putconn(conn)
@@ -81,7 +98,7 @@ def _execute_with_retry(operation, max_attempts: int = 3):
             # request. For read-only errors this is what forces HAProxy to
             # hand us a connection to the new primary on the next getconn().
             try:
-                _pool.putconn(conn, close=True)
+                pool.putconn(conn, close=True)
             except Exception:
                 pass
             # Try again with a fresh connection
@@ -89,7 +106,7 @@ def _execute_with_retry(operation, max_attempts: int = 3):
         except Exception:
             # Non-connection error — return connection to pool, re-raise
             try:
-                _pool.putconn(conn)
+                pool.putconn(conn)
             except Exception:
                 pass
             raise

@@ -156,7 +156,16 @@ networks:
     attachable: true
     name: ${OVERLAY_NETWORK}
 
+# Volumes are created EXTERNALLY by deploy-db-stack.sh with a "keep" label
+# that prevents `docker system prune --volumes` from deleting them. See
+# deploy-db-stack.sh for the docker volume create commands.
 volumes:
   patroni-rishi-1-data:
+    external: true
+    name: ${SWARM_STACK}_patroni-rishi-1-data
   patroni-rishi-2-data:
+    external: true
+    name: ${SWARM_STACK}_patroni-rishi-2-data
   patroni-rishi-3-data:
+    external: true
+    name: ${SWARM_STACK}_patroni-rishi-3-data
