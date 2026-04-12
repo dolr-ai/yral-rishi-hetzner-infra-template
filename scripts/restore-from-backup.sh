@@ -118,38 +118,30 @@ echo "==> Restoring..."
 ssh -i "${SSH_KEY}" "${DEPLOY_USER}@${SERVER_1_IP}" bash <<REMOTE
 set -e
 
-# Find leader
-LEADER=""
-for C in \$(docker ps -qf "name=${SWARM_STACK}_patroni-rishi"); do
-    PG=\$(docker exec "\$C" cat /run/secrets/postgres_password 2>/dev/null)
-    IS_LEADER=\$(docker exec -e PGPASSWORD="\$PG" "\$C" psql -h 127.0.0.1 -U postgres -tAc "SELECT pg_is_in_recovery();" 2>/dev/null)
-    if [ "\$IS_LEADER" = "f" ]; then
-        LEADER="\$C"
-        break
-    fi
-done
-[ -z "\$LEADER" ] && { echo "FATAL: no leader"; exit 1; }
-PG=\$(docker exec "\$LEADER" cat /run/secrets/postgres_password 2>/dev/null)
-echo "leader: \$LEADER"
+# Find ANY local patroni container (connect through HAProxy to the leader)
+C=\$(docker ps -qf "name=${SWARM_STACK}_patroni-rishi" | head -1)
+[ -z "\$C" ] && { echo "FATAL: no local patroni container"; exit 1; }
+PG=\$(docker exec "\$C" cat /run/secrets/postgres_password 2>/dev/null)
+echo "using container \$C → haproxy-rishi-1 → leader"
 
-# Terminate connections + drop + recreate
-docker exec -e PGPASSWORD="\$PG" "\$LEADER" psql -h 127.0.0.1 -U postgres -c "
+# Terminate connections + drop + recreate (via HAProxy → leader)
+docker exec -e PGPASSWORD="\$PG" "\$C" psql -h haproxy-rishi-1 -U postgres -c "
     SELECT pg_terminate_backend(pid) FROM pg_stat_activity
     WHERE datname = '${POSTGRES_DB}' AND pid <> pg_backend_pid();
 " 2>/dev/null || true
-docker exec -e PGPASSWORD="\$PG" "\$LEADER" psql -h 127.0.0.1 -U postgres -c "DROP DATABASE IF EXISTS ${POSTGRES_DB};"
-docker exec -e PGPASSWORD="\$PG" "\$LEADER" psql -h 127.0.0.1 -U postgres -c "CREATE DATABASE ${POSTGRES_DB};"
+docker exec -e PGPASSWORD="\$PG" "\$C" psql -h haproxy-rishi-1 -U postgres -c "DROP DATABASE IF EXISTS ${POSTGRES_DB};"
+docker exec -e PGPASSWORD="\$PG" "\$C" psql -h haproxy-rishi-1 -U postgres -c "CREATE DATABASE ${POSTGRES_DB};"
 echo "database recreated"
 
-# Restore from dump
-gunzip -c ${DOWNLOAD_PATH} | docker exec -i -e PGPASSWORD="\$PG" "\$LEADER" psql -h 127.0.0.1 -U postgres -d ${POSTGRES_DB} 2>&1 | tail -5
+# Restore from dump (via HAProxy → leader)
+gunzip -c ${DOWNLOAD_PATH} | docker exec -i -e PGPASSWORD="\$PG" "\$C" psql -h haproxy-rishi-1 -U postgres -d ${POSTGRES_DB} 2>&1 | tail -5
 echo "restore complete"
 
 # Verify
 echo "--- tables after restore ---"
-docker exec -e PGPASSWORD="\$PG" "\$LEADER" psql -h 127.0.0.1 -U postgres -d ${POSTGRES_DB} -c "\\dt"
+docker exec -e PGPASSWORD="\$PG" "\$C" psql -h haproxy-rishi-1 -U postgres -d ${POSTGRES_DB} -c "\\dt"
 echo "--- schema_migrations ---"
-docker exec -e PGPASSWORD="\$PG" "\$LEADER" psql -h 127.0.0.1 -U postgres -d ${POSTGRES_DB} -c "SELECT * FROM schema_migrations ORDER BY filename;" 2>/dev/null || echo "(no schema_migrations table)"
+docker exec -e PGPASSWORD="\$PG" "\$C" psql -h haproxy-rishi-1 -U postgres -d ${POSTGRES_DB} -c "SELECT * FROM schema_migrations ORDER BY filename;" 2>/dev/null || echo "(no schema_migrations table)"
 REMOTE
 
 # ----- Re-run migrations (backup may be from before a migration) -----
