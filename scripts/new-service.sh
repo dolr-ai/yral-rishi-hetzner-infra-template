@@ -335,6 +335,18 @@ set_secret REPLICATION_PASSWORD  "${REPL_PASS}"
 # The full database URL for each server (used by the app to connect)
 set_secret DATABASE_URL_SERVER_1 "${DB_URL_1}"
 set_secret DATABASE_URL_SERVER_2 "${DB_URL_2}"
+# S3 backup credentials (shared across all dolr-ai services — same bucket,
+# per-project prefix). Read from local config files at ~/.config/dolr-ai/.
+# These are set once by the infra admin and reused for every new service.
+S3_CREDS_DIR="${HOME}/.config/dolr-ai"
+if [ -f "${S3_CREDS_DIR}/s3-access-key" ] && [ -f "${S3_CREDS_DIR}/s3-secret-key" ]; then
+    set_secret BACKUP_S3_ACCESS_KEY "$(cat "${S3_CREDS_DIR}/s3-access-key")"
+    set_secret BACKUP_S3_SECRET_KEY "$(cat "${S3_CREDS_DIR}/s3-secret-key")"
+else
+    warn "S3 backup credentials not found at ${S3_CREDS_DIR}/s3-access-key"
+    warn "Backups will not work until BACKUP_S3_ACCESS_KEY + BACKUP_S3_SECRET_KEY are set."
+    warn "Save them: mkdir -p ${S3_CREDS_DIR} && echo 'KEY' > ${S3_CREDS_DIR}/s3-access-key && echo 'SECRET' > ${S3_CREDS_DIR}/s3-secret-key"
+fi
 # Sentry DSN is optional — only set if provided via --sentry-dsn
 [ -n "${SENTRY_DSN}" ] && set_secret SENTRY_DSN "${SENTRY_DSN}"
 

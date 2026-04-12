@@ -80,5 +80,37 @@ if grep -rIn --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=tests \
 fi
 pass "no stale names"
 
+echo "==> 8. Naming consistency — Dockerfiles match project.config"
+# The LABEL in each Dockerfile should reference THIS project's repo, not
+# the template's. This catches the case where init-from-template.sh didn't
+# update the Dockerfiles (or a new Dockerfile was added without the right name).
+for df in Dockerfile backup/Dockerfile patroni/Dockerfile; do
+    [ -f "$df" ] || continue
+    if grep -q "org.opencontainers.image.source" "$df"; then
+        if ! grep -q "dolr-ai/${PROJECT_REPO}" "$df"; then
+            fail "$df has wrong image.source label — expected dolr-ai/${PROJECT_REPO}"
+        fi
+    fi
+done
+pass "Dockerfile labels match project.config"
+
+echo "==> 9. Naming consistency — docs reference this project, not the template"
+# Skip this check on the TEMPLATE ITSELF (PROJECT_NAME contains "hetzner-infra-template").
+# Only run on services created FROM the template.
+if [ "${PROJECT_NAME}" != "rishi-hetzner-infra-template" ]; then
+    STALE_REFS=$(grep -rIn --include='*.md' --exclude-dir=.git \
+        'rishi-hetzner-infra-template' . 2>/dev/null \
+        | grep -v 'NAMING-CONVENTIONS.md' \
+        | grep -v 'init-from-template.sh' \
+        | grep -v 'TEMPLATE.md' || true)
+    if [ -n "$STALE_REFS" ]; then
+        echo "$STALE_REFS"
+        fail "found template name references in docs — run: bash scripts/init-from-template.sh ${PROJECT_NAME}"
+    fi
+    pass "no template name leaks in docs"
+else
+    pass "skipping (this IS the template)"
+fi
+
 echo
 echo "All template integrity checks passed."

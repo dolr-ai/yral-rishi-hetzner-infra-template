@@ -124,17 +124,51 @@ fi
 # "-i.bak" = edit the file in place, save a backup as .bak
 # "-e 's|old|new|g'" = substitute "old" with "new" globally (all occurrences)
 #
+# STEP 1: Replace in project.config (the runtime source of truth).
 # We do the UNDERSCORE version FIRST because "rishi_hetzner_infra_template"
 # is a substring of "rishi-hetzner-infra-template" in some patterns. If we
 # did the hyphen version first, it would change the underscores in POSTGRES_DB
 # incorrectly.
+echo "  Updating project.config..."
 sed -i.bak \
     -e "s|rishi_hetzner_infra_template|${NEW_NAME_UNDERSCORE}|g" \
     -e "s|rishi-hetzner-infra-template|${NEW_NAME}|g" \
     "${CONFIG}"
-
-# Delete the backup file (we don't need it; git has the history)
 rm -f "${CONFIG}.bak"
+
+# STEP 2: Replace in ALL other files that have hardcoded template references.
+# WHY? Not everything uses ${VAR} interpolation. Dockerfiles have LABEL
+# directives with hardcoded GitHub URLs, documentation files have example
+# URLs and project names, and script comments reference the template name.
+#
+# We find every text file in the repo (excluding .git/ and binary files)
+# and replace ALL occurrences of the template name.
+echo "  Updating Dockerfiles, docs, scripts, and configs..."
+
+# Build the list of files to update. "find" locates files, "-type f" means
+# regular files only, "-not -path '*/.git/*'" excludes the git directory.
+# We process known text file types to avoid corrupting binary files.
+find "${REPO_ROOT}" -type f \
+    \( -name '*.md' -o -name '*.yml' -o -name '*.yaml' -o -name '*.sh' \
+       -o -name '*.py' -o -name '*.sql' -o -name '*.cfg' -o -name '*.toml' \
+       -o -name '*.template' -o -name 'Dockerfile' -o -name '.gitignore' \
+       -o -name '.dockerignore' -o -name '*.txt' \) \
+    -not -path '*/.git/*' \
+    -not -path '*/.venv/*' \
+    -not -path '*/.bootstrap-secrets/*' \
+    -not -name 'init-from-template.sh' \
+    | while read -r FILE; do
+    # Only process files that actually contain the template name
+    # (avoids unnecessary writes and preserves file timestamps)
+    if grep -q 'rishi.hetzner.infra.template' "$FILE" 2>/dev/null; then
+        sed -i.bak \
+            -e "s|yral-rishi-hetzner-infra-template|yral-${NEW_NAME}|g" \
+            -e "s|rishi_hetzner_infra_template|${NEW_NAME_UNDERSCORE}|g" \
+            -e "s|rishi-hetzner-infra-template|${NEW_NAME}|g" \
+            "$FILE"
+        rm -f "${FILE}.bak"
+    fi
+done
 
 # Show the result
 echo ""
@@ -143,17 +177,25 @@ echo "------------------------------------------------------------"
 cat "${CONFIG}"
 echo "------------------------------------------------------------"
 echo ""
+
+# Verify: count remaining template references (should be 0 outside init-from-template.sh)
+REMAINING=$(grep -r --include='*.md' --include='*.yml' --include='*.sh' \
+    --include='*.py' --include='*.sql' --include='*.cfg' --include='Dockerfile' \
+    -l 'rishi-hetzner-infra-template' "${REPO_ROOT}" 2>/dev/null \
+    | grep -v '.git/' | grep -v 'init-from-template.sh' | grep -v '.bak' || true)
+if [ -n "$REMAINING" ]; then
+    echo "WARNING: template name still found in these files:"
+    echo "$REMAINING"
+    echo "(These may need manual review)"
+else
+    echo "✓ No template references remaining — all files renamed to ${NEW_NAME}"
+fi
+
+echo ""
 echo "NEXT STEPS:"
 echo "  1. Edit app/main.py and app/database.py with your service's business logic"
-echo "  2. Edit patroni/init.sql with your DB schema (or delete if no DB needed)"
+echo "  2. Add your DB schema as migrations/002_your_schema.sql"
 echo "  3. Update requirements.txt with your Python dependencies"
-echo "  4. Update README.md / CLAUDE.md with what your service does"
-echo "  5. Test locally: bash local/setup.sh"
+echo "  4. Test locally: bash local/setup.sh"
 echo "     Verify: curl http://localhost:8080/"
-echo "  6. When green, create the GitHub repo:"
-echo "       gh repo create dolr-ai/yral-${NEW_NAME} --public"
-echo "  7. Set 9 GitHub secrets (see TEMPLATE.md)"
-echo "  8. git init && git add -A && git commit -m 'Initial commit' && git push"
-echo ""
-echo "Note: this script does NOT touch any file other than project.config."
-echo "Every other file uses \${VAR} interpolation from project.config."
+echo "  5. Push: git push (CI deploys automatically)"
