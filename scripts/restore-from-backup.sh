@@ -44,9 +44,16 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# S3 credentials
+# S3 credentials — try env vars first, fall back to macOS Keychain
 S3_ACCESS="${BACKUP_S3_ACCESS_KEY:-${AWS_ACCESS_KEY_ID:-}}"
 S3_SECRET="${BACKUP_S3_SECRET_KEY:-${AWS_SECRET_ACCESS_KEY:-}}"
+# If not set via env vars, read from macOS Keychain (where new-service.sh stores them)
+if [ -z "${S3_ACCESS}" ] && command -v security &>/dev/null; then
+    S3_ACCESS=$(security find-generic-password -a "dolr-ai" -s "BACKUP_S3_ACCESS_KEY" -w 2>/dev/null || echo "")
+fi
+if [ -z "${S3_SECRET}" ] && command -v security &>/dev/null; then
+    S3_SECRET=$(security find-generic-password -a "dolr-ai" -s "BACKUP_S3_SECRET_KEY" -w 2>/dev/null || echo "")
+fi
 
 BACKUP_IMAGE="${IMAGE_REPO}-backup:latest"
 S3_PREFIX="rishi-yral/${PROJECT_REPO}"
