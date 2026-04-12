@@ -1,19 +1,28 @@
 #!/bin/bash
 # =============================================================================
-# restore-from-backup.sh — download a backup from S3 and restore it.
+# restore-from-backup.sh — restore the database from a backup in S3.
 #
-# Uses the backup Docker image (which has mc) for S3 access — no need to
-# install aws-cli or mc on your Mac.
+# This script triggers the restore.yml GitHub Actions workflow, which:
+#   1. SSHes into rishi-1 (the Swarm manager)
+#   2. Downloads the backup from S3 using credentials from GitHub Secrets
+#   3. Drops + recreates the database
+#   4. Restores the SQL dump
+#   5. Re-runs pending migrations
+#   6. Restarts app containers on both servers
+#
+# WHY A CI WORKFLOW (not a local script)?
+# S3 credentials (BACKUP_S3_ACCESS_KEY + BACKUP_S3_SECRET_KEY) are stored
+# in GitHub Secrets — the most secure location. They're never stored on
+# your local Mac or in code. The CI workflow reads them directly from
+# GitHub Secrets and passes them to the server.
 #
 # Usage:
-#   bash scripts/restore-from-backup.sh --latest
-#   bash scripts/restore-from-backup.sh --date 2026-04-12
-#   bash scripts/restore-from-backup.sh --file path/to/local.sql.gz
-#   bash scripts/restore-from-backup.sh --latest --yes       # skip prompts
+#   bash scripts/restore-from-backup.sh --latest           # restore latest
+#   bash scripts/restore-from-backup.sh --date 2026-04-12  # restore by date
+#   bash scripts/restore-from-backup.sh --file local.sql.gz # restore local file
 #
-# After restore, the script:
-#   1. Re-runs all pending migrations (the backup may be from before a migration)
-#   2. Restarts app containers on both servers (clears stale connection pool)
+# For --latest and --date: triggers the restore.yml workflow in GitHub Actions.
+# For --file: uploads the file to the server and restores directly (no S3).
 # =============================================================================
 
 set -euo pipefail
@@ -27,6 +36,7 @@ source "${REPO_ROOT}/servers.config"
 set +a
 
 SSH_KEY="${SSH_KEY_PATH/#\~/$HOME}"
+ORG="dolr-ai"
 
 # Args
 DATE=""
@@ -44,102 +54,92 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# S3 credentials — try env vars first, fall back to macOS Keychain
-S3_ACCESS="${BACKUP_S3_ACCESS_KEY:-${AWS_ACCESS_KEY_ID:-}}"
-S3_SECRET="${BACKUP_S3_SECRET_KEY:-${AWS_SECRET_ACCESS_KEY:-}}"
-# If not set via env vars, read from macOS Keychain (where new-service.sh stores them)
-if [ -z "${S3_ACCESS}" ] && command -v security &>/dev/null; then
-    S3_ACCESS=$(security find-generic-password -a "dolr-ai" -s "BACKUP_S3_ACCESS_KEY" -w 2>/dev/null || echo "")
-fi
-if [ -z "${S3_SECRET}" ] && command -v security &>/dev/null; then
-    S3_SECRET=$(security find-generic-password -a "dolr-ai" -s "BACKUP_S3_SECRET_KEY" -w 2>/dev/null || echo "")
-fi
-
-BACKUP_IMAGE="${IMAGE_REPO}-backup:latest"
-S3_PREFIX="rishi-yral/${PROJECT_REPO}"
-DOWNLOAD_PATH="/tmp/restore_${PROJECT_REPO}.sql.gz"
-
 # ----- PROJECT ISOLATION GUARD -----
-# Ensure we only restore from THIS project's S3 prefix, never another project's.
 if [ -z "${PROJECT_REPO}" ] || [ "${PROJECT_REPO}" = "yral-" ]; then
     echo "FATAL: PROJECT_REPO is empty or invalid — refusing to run"
     exit 1
 fi
-echo "==> Project isolation: restore restricted to s3://${S3_PREFIX}/"
 
-# ----- Download the backup -----
-if [ -n "${LOCAL_FILE}" ]; then
-    [ ! -f "${LOCAL_FILE}" ] && { echo "FATAL: file not found: ${LOCAL_FILE}"; exit 1; }
-    DOWNLOAD_PATH="${LOCAL_FILE}"
-    echo "==> Using local file: ${DOWNLOAD_PATH}"
-elif [ -z "${S3_ACCESS}" ] || [ -z "${S3_SECRET}" ]; then
-    echo "FATAL: S3 credentials not set."
-    echo "  Export BACKUP_S3_ACCESS_KEY + BACKUP_S3_SECRET_KEY"
-    exit 1
-else
-    echo "==> Finding backup in S3..."
+# =================================================================
+# PATH 1: Restore from S3 via GitHub Actions workflow
+# (--latest or --date) — S3 creds come from GitHub Secrets
+# =================================================================
+if [ -z "${LOCAL_FILE}" ]; then
+    TARGET="latest"
+    [ -n "${DATE}" ] && TARGET="${DATE}"
+    [ "${LATEST}" = "true" ] && TARGET="latest"
 
-    # Use the backup Docker image (has mc) via SSH to rishi-1
-    BACKUP_FILE=""
-    if [ "${LATEST}" = "true" ]; then
-        BACKUP_FILE=$(ssh -i "${SSH_KEY}" "${DEPLOY_USER}@${SERVER_1_IP}" "
-            docker run --rm ${BACKUP_IMAGE} sh -c '
-                mc alias set h ${BACKUP_S3_ENDPOINT} ${S3_ACCESS} ${S3_SECRET} --api s3v4 >/dev/null 2>&1
-                mc ls h/${S3_PREFIX}/daily/ | awk \"{print \\\$NF}\" | sort | tail -1
-            '
-        ")
-    elif [ -n "${DATE}" ]; then
-        BACKUP_FILE=$(ssh -i "${SSH_KEY}" "${DEPLOY_USER}@${SERVER_1_IP}" "
-            docker run --rm ${BACKUP_IMAGE} sh -c '
-                mc alias set h ${BACKUP_S3_ENDPOINT} ${S3_ACCESS} ${S3_SECRET} --api s3v4 >/dev/null 2>&1
-                mc ls h/${S3_PREFIX}/daily/ | awk \"{print \\\$NF}\" | grep \"^${DATE}\" | sort | tail -1
-            '
-        ")
+    echo "==> Triggering restore.yml workflow (target=${TARGET})"
+    echo "    S3 credentials will be read from GitHub Secrets"
+    echo "    Project isolation: restricted to s3://rishi-yral/${PROJECT_REPO}/"
+    echo ""
+
+    if [ "${ASSUME_YES}" != "true" ]; then
+        echo "WARNING: This will DROP the '${POSTGRES_DB}' database and replace"
+        echo "it with the backup. All data created after the backup is lost."
+        read -p "Type '${POSTGRES_DB}' to confirm: " CONFIRM
+        [ "${CONFIRM}" = "${POSTGRES_DB}" ] || { echo "Aborted."; exit 1; }
     fi
 
-    [ -z "${BACKUP_FILE}" ] && { echo "FATAL: no backup found"; exit 1; }
-    echo "    found: ${BACKUP_FILE}"
+    # Trigger the workflow
+    gh workflow run restore.yml --repo "${ORG}/${PROJECT_REPO}" -f target="${TARGET}"
+    echo "  Workflow triggered. Waiting for it to start..."
 
-    # Download to rishi-1's /tmp
-    echo "==> Downloading ${BACKUP_FILE} to rishi-1..."
-    ssh -i "${SSH_KEY}" "${DEPLOY_USER}@${SERVER_1_IP}" "
-        docker run --rm -v /tmp:/download ${BACKUP_IMAGE} sh -c '
-            mc alias set h ${BACKUP_S3_ENDPOINT} ${S3_ACCESS} ${S3_SECRET} --api s3v4 >/dev/null 2>&1
-            mc cp h/${S3_PREFIX}/daily/${BACKUP_FILE} /download/restore.sql.gz
-        '
-    "
-    DOWNLOAD_PATH="/tmp/restore.sql.gz"
+    # Find the run ID
+    RID=""
+    for i in 1 2 3 4 5 6; do
+        sleep 5
+        RID=$(gh run list --repo "${ORG}/${PROJECT_REPO}" --workflow=restore.yml --limit 1 \
+                --json databaseId -q '.[0].databaseId' 2>/dev/null || echo "")
+        [ -n "${RID}" ] && break
+    done
+
+    if [ -n "${RID}" ]; then
+        echo "  Watching restore run ${RID}..."
+        gh run watch "${RID}" --repo "${ORG}/${PROJECT_REPO}" --exit-status 2>&1 \
+            && echo "✓ Restore completed successfully" \
+            || { echo "✗ Restore failed. Check: gh run view ${RID} --repo ${ORG}/${PROJECT_REPO} --log-failed"; exit 1; }
+    else
+        echo "WARNING: Could not find restore run. Check GitHub Actions manually."
+        exit 1
+    fi
+
+    echo ""
+    echo "==> Verify:"
+    echo "    curl https://${PROJECT_DOMAIN}/health"
+    echo "    curl https://${PROJECT_DOMAIN}/"
+    exit 0
 fi
 
-# ----- Confirmation -----
-echo
-echo "=========================================="
-echo " RESTORE: ${POSTGRES_DB}"
-echo " from:    ${BACKUP_FILE:-${LOCAL_FILE}}"
-echo " server:  ${SERVER_1_IP}"
-echo
-echo " WARNING: this will DROP the existing database,"
-echo " restore from the backup, then re-run any pending"
-echo " migrations to bring the schema up to date."
-echo "=========================================="
+# =================================================================
+# PATH 2: Restore from a local SQL file (--file)
+# No S3 involved — upload file to server and restore directly
+# =================================================================
+echo "==> Restoring from local file: ${LOCAL_FILE}"
+[ ! -f "${LOCAL_FILE}" ] && { echo "FATAL: file not found: ${LOCAL_FILE}"; exit 1; }
 
 if [ "${ASSUME_YES}" != "true" ]; then
+    echo ""
+    echo "WARNING: This will DROP the '${POSTGRES_DB}' database and replace"
+    echo "it with the contents of ${LOCAL_FILE}."
     read -p "Type '${POSTGRES_DB}' to confirm: " CONFIRM
     [ "${CONFIRM}" = "${POSTGRES_DB}" ] || { echo "Aborted."; exit 1; }
 fi
 
-# ----- Restore -----
+# Upload the file to rishi-1
+echo "==> Uploading ${LOCAL_FILE} to rishi-1..."
+scp -i "${SSH_KEY}" "${LOCAL_FILE}" "${DEPLOY_USER}@${SERVER_1_IP}:/tmp/restore.sql.gz"
+
+# Restore on the server
 echo "==> Restoring..."
 ssh -i "${SSH_KEY}" "${DEPLOY_USER}@${SERVER_1_IP}" bash <<REMOTE
 set -e
 
-# Find ANY local patroni container (connect through HAProxy to the leader)
 C=\$(docker ps -qf "name=${SWARM_STACK}_patroni-rishi" | head -1)
 [ -z "\$C" ] && { echo "FATAL: no local patroni container"; exit 1; }
 PG=\$(docker exec "\$C" cat /run/secrets/postgres_password 2>/dev/null)
 echo "using container \$C → haproxy-rishi-1 → leader"
 
-# Terminate connections + drop + recreate (via HAProxy → leader)
 docker exec -e PGPASSWORD="\$PG" "\$C" psql -h haproxy-rishi-1 -U postgres -c "
     SELECT pg_terminate_backend(pid) FROM pg_stat_activity
     WHERE datname = '${POSTGRES_DB}' AND pid <> pg_backend_pid();
@@ -148,32 +148,29 @@ docker exec -e PGPASSWORD="\$PG" "\$C" psql -h haproxy-rishi-1 -U postgres -c "D
 docker exec -e PGPASSWORD="\$PG" "\$C" psql -h haproxy-rishi-1 -U postgres -c "CREATE DATABASE ${POSTGRES_DB};"
 echo "database recreated"
 
-# Restore from dump (via HAProxy → leader)
-gunzip -c ${DOWNLOAD_PATH} | docker exec -i -e PGPASSWORD="\$PG" "\$C" psql -h haproxy-rishi-1 -U postgres -d ${POSTGRES_DB} 2>&1 | tail -5
+gunzip -c /tmp/restore.sql.gz | docker exec -i -e PGPASSWORD="\$PG" "\$C" psql -h haproxy-rishi-1 -U postgres -d ${POSTGRES_DB} 2>&1 | tail -5
 echo "restore complete"
 
-# Verify
 echo "--- tables after restore ---"
 docker exec -e PGPASSWORD="\$PG" "\$C" psql -h haproxy-rishi-1 -U postgres -d ${POSTGRES_DB} -c "\\dt"
-echo "--- schema_migrations ---"
-docker exec -e PGPASSWORD="\$PG" "\$C" psql -h haproxy-rishi-1 -U postgres -d ${POSTGRES_DB} -c "SELECT * FROM schema_migrations ORDER BY filename;" 2>/dev/null || echo "(no schema_migrations table)"
+
+rm -f /tmp/restore.sql.gz
 REMOTE
 
-# ----- Re-run migrations (backup may be from before a migration) -----
-echo "==> Re-running migrations to bring schema up to date..."
+# Re-run migrations
+echo "==> Re-running migrations..."
 ssh -i "${SSH_KEY}" "${DEPLOY_USER}@${SERVER_1_IP}" \
     "cd /home/${DEPLOY_USER}/${PROJECT_REPO} && APP_DIR=/home/${DEPLOY_USER}/${PROJECT_REPO} bash scripts/ci/run-migrations.sh" 2>&1 || \
     echo "⚠ Migration runner failed — may need manual intervention"
 
-# ----- Restart app containers -----
-echo "==> Restarting app containers (clearing stale connection pool)..."
+# Restart app containers
+echo "==> Restarting app containers..."
 for IP in ${SERVER_1_IP} ${SERVER_2_IP}; do
     ssh -i "${SSH_KEY}" "${DEPLOY_USER}@${IP}" "docker restart ${PROJECT_REPO} 2>/dev/null" && \
         echo "  restarted on $(ssh -i "${SSH_KEY}" "${DEPLOY_USER}@${IP}" hostname)"
 done
 
-sleep 5
-echo
+echo ""
 echo "==> Restore complete. Verify:"
-echo "    curl https://${PROJECT_DOMAIN}/"
 echo "    curl https://${PROJECT_DOMAIN}/health"
+echo "    curl https://${PROJECT_DOMAIN}/"

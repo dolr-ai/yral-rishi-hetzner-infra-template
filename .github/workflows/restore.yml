@@ -1,0 +1,169 @@
+# ---------------------------------------------------------------------------
+# restore.yml — GitHub Actions workflow to restore the database from a backup.
+#
+# WHAT DOES THIS DO?
+# 1. SSHes into rishi-1 (the Swarm manager)
+# 2. Uses the backup Docker image (which has mc) to download from S3
+# 3. Drops + recreates the database
+# 4. Restores the SQL dump
+# 5. Re-runs pending migrations (backup may predate a migration)
+# 6. Restarts app containers on both servers (clears stale connection pools)
+#
+# WHEN TO USE:
+# - Data corruption or accidental deletion
+# - Disaster recovery
+# - Rolling back a bad migration (restore to pre-migration state)
+#
+# HOW TO RUN:
+#   gh workflow run restore.yml                          # restore latest backup
+#   gh workflow run restore.yml -f target=2026-04-12     # restore specific date
+#
+# S3 CREDENTIALS:
+# Read from GitHub Secrets (BACKUP_S3_ACCESS_KEY + BACKUP_S3_SECRET_KEY).
+# Same credentials as backup.yml — set once per repo, shared with backup.
+# No local credentials needed.
+#
+# WARNING: This DROPS the existing database and replaces it with the backup.
+# All data created after the backup point is permanently lost.
+# ---------------------------------------------------------------------------
+
+name: Restore Database from Backup
+
+on:
+  # Manual trigger only — restores should never be automatic
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Backup date (YYYY-MM-DD) or "latest"'
+        required: false
+        default: 'latest'
+        type: string
+
+jobs:
+  restore:
+    name: Download from S3 + restore database
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Load project.config + servers.config
+        run: |
+          grep -v '^#' project.config | grep -v '^$' >> $GITHUB_ENV
+          grep -v '^#' servers.config | grep -v '^$' >> $GITHUB_ENV
+
+      - name: Skip if stateless
+        if: env.WITH_DATABASE == 'false'
+        run: |
+          echo "WITH_DATABASE=false — no database to restore."
+          exit 1
+
+      - name: Restore database on rishi-1
+        if: env.WITH_DATABASE != 'false'
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ env.SERVER_1_IP }}
+          username: ${{ env.DEPLOY_USER }}
+          key: ${{ secrets.HETZNER_BARE_METAL_GITHUB_ACTIONS_SSH_PRIVATE_KEY }}
+          command_timeout: 10m
+          envs: BACKUP_S3_ACCESS_KEY,BACKUP_S3_SECRET_KEY,POSTGRES_DB,PROJECT_REPO,BACKUP_S3_ENDPOINT,BACKUP_S3_BUCKET,OVERLAY_NETWORK,SWARM_STACK,IMAGE_REPO,RESTORE_TARGET
+          script: |
+            set -e
+
+            # ----- Project isolation guard -----
+            if [ -z "${PROJECT_REPO}" ] || [ "${PROJECT_REPO}" = "yral-" ]; then
+              echo "FATAL: PROJECT_REPO is empty or invalid"
+              exit 1
+            fi
+            S3_PREFIX="${BACKUP_S3_BUCKET}/${PROJECT_REPO}"
+            echo "==> Project isolation: restore restricted to s3://${S3_PREFIX}/"
+
+            # ----- Find the backup file in S3 -----
+            echo "==> Finding backup in S3..."
+            if [ "${RESTORE_TARGET}" = "latest" ] || [ -z "${RESTORE_TARGET}" ]; then
+              BACKUP_FILE=$(docker run --rm \
+                -e MC_HOST_hetzner="https://${BACKUP_S3_ACCESS_KEY}:${BACKUP_S3_SECRET_KEY}@${BACKUP_S3_ENDPOINT#https://}" \
+                ${IMAGE_REPO}-backup:latest sh -c \
+                "mc ls hetzner/${S3_PREFIX}/daily/ 2>/dev/null | awk '{print \$NF}' | sort | tail -1")
+            else
+              BACKUP_FILE=$(docker run --rm \
+                -e MC_HOST_hetzner="https://${BACKUP_S3_ACCESS_KEY}:${BACKUP_S3_SECRET_KEY}@${BACKUP_S3_ENDPOINT#https://}" \
+                ${IMAGE_REPO}-backup:latest sh -c \
+                "mc ls hetzner/${S3_PREFIX}/daily/ 2>/dev/null | awk '{print \$NF}' | grep '^${RESTORE_TARGET}' | sort | tail -1")
+            fi
+
+            [ -z "${BACKUP_FILE}" ] && { echo "FATAL: no backup found for target '${RESTORE_TARGET}'"; exit 1; }
+            echo "    found: ${BACKUP_FILE}"
+
+            # ----- Download the backup to rishi-1 -----
+            echo "==> Downloading ${BACKUP_FILE}..."
+            docker run --rm -v /tmp:/download \
+              -e MC_HOST_hetzner="https://${BACKUP_S3_ACCESS_KEY}:${BACKUP_S3_SECRET_KEY}@${BACKUP_S3_ENDPOINT#https://}" \
+              ${IMAGE_REPO}-backup:latest sh -c \
+              "mc cp hetzner/${S3_PREFIX}/daily/${BACKUP_FILE} /download/restore.sql.gz"
+
+            # ----- Get the database password -----
+            PGPASSWORD=$(docker secret inspect ${SWARM_STACK}_postgres_password --format '{{.Spec.Data}}' 2>/dev/null | base64 -d 2>/dev/null || echo "")
+            if [ -z "$PGPASSWORD" ]; then
+              LEADER=$(docker ps -qf "name=${SWARM_STACK}_patroni-rishi" | head -1)
+              PGPASSWORD=$(docker exec "$LEADER" cat /run/secrets/postgres_password 2>/dev/null)
+            fi
+            [ -z "$PGPASSWORD" ] && { echo "FATAL: could not read postgres password"; exit 1; }
+
+            C=$(docker ps -qf "name=${SWARM_STACK}_patroni-rishi" | head -1)
+            echo "==> Using container $C → haproxy-rishi-1 → leader"
+
+            # ----- Drop + recreate + restore -----
+            echo "==> Terminating connections + dropping database..."
+            docker exec -e PGPASSWORD="$PGPASSWORD" "$C" psql -h haproxy-rishi-1 -U postgres -c "
+              SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+              WHERE datname = '${POSTGRES_DB}' AND pid <> pg_backend_pid();
+            " 2>/dev/null || true
+            docker exec -e PGPASSWORD="$PGPASSWORD" "$C" psql -h haproxy-rishi-1 -U postgres -c "DROP DATABASE IF EXISTS ${POSTGRES_DB};"
+            docker exec -e PGPASSWORD="$PGPASSWORD" "$C" psql -h haproxy-rishi-1 -U postgres -c "CREATE DATABASE ${POSTGRES_DB};"
+            echo "    database recreated"
+
+            echo "==> Restoring from dump..."
+            gunzip -c /tmp/restore.sql.gz | docker exec -i -e PGPASSWORD="$PGPASSWORD" "$C" psql -h haproxy-rishi-1 -U postgres -d ${POSTGRES_DB} 2>&1 | tail -5
+            echo "    restore complete"
+
+            # ----- Verify -----
+            echo "==> Tables after restore:"
+            docker exec -e PGPASSWORD="$PGPASSWORD" "$C" psql -h haproxy-rishi-1 -U postgres -d ${POSTGRES_DB} -c "\dt"
+
+            echo "==> Schema migrations:"
+            docker exec -e PGPASSWORD="$PGPASSWORD" "$C" psql -h haproxy-rishi-1 -U postgres -d ${POSTGRES_DB} -c "SELECT * FROM schema_migrations ORDER BY filename;" 2>/dev/null || echo "(no schema_migrations table)"
+
+            # Clean up
+            rm -f /tmp/restore.sql.gz
+
+        env:
+          BACKUP_S3_ACCESS_KEY: ${{ secrets.BACKUP_S3_ACCESS_KEY }}
+          BACKUP_S3_SECRET_KEY: ${{ secrets.BACKUP_S3_SECRET_KEY }}
+          RESTORE_TARGET: ${{ github.event.inputs.target }}
+
+      # Re-run migrations (backup might predate a migration)
+      - name: Re-run migrations
+        if: env.WITH_DATABASE != 'false'
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ env.SERVER_1_IP }}
+          username: ${{ env.DEPLOY_USER }}
+          key: ${{ secrets.HETZNER_BARE_METAL_GITHUB_ACTIONS_SSH_PRIVATE_KEY }}
+          script: |
+            cd /home/${{ env.DEPLOY_USER }}/${{ env.PROJECT_REPO }} 2>/dev/null && \
+              APP_DIR=/home/${{ env.DEPLOY_USER }}/${{ env.PROJECT_REPO }} bash scripts/ci/run-migrations.sh || \
+              echo "⚠ Migration runner unavailable — may need a deploy first"
+
+      # Restart app containers on both servers
+      - name: Restart app containers
+        if: env.WITH_DATABASE != 'false'
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ env.SERVER_1_IP }},${{ env.SERVER_2_IP }}
+          username: ${{ env.DEPLOY_USER }}
+          key: ${{ secrets.HETZNER_BARE_METAL_GITHUB_ACTIONS_SSH_PRIVATE_KEY }}
+          script: |
+            docker restart ${{ env.PROJECT_REPO }} 2>/dev/null && \
+              echo "✓ restarted ${{ env.PROJECT_REPO }} on $(hostname)" || \
+              echo "⚠ ${{ env.PROJECT_REPO }} not running on $(hostname)"

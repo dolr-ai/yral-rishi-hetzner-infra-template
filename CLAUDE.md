@@ -180,6 +180,7 @@ WHY blocks, header blocks, 5 required docs per service).
 | `tests/integration/` | Manual failover + isolation + parity tests |
 | `.github/workflows/deploy.yml` | CI/CD pipeline |
 | `.github/workflows/backup.yml` | Scheduled daily backup |
+| `.github/workflows/restore.yml` | Manual database restore from S3 backup |
 | `.github/workflows/infra-health.yml` | 5-min health check + auto-reinit of failed replicas |
 
 ---
