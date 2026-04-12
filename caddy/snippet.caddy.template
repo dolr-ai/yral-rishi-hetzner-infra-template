@@ -1,3 +1,30 @@
+# ---------------------------------------------------------------------------
+# snippet.caddy.template — Caddy reverse proxy configuration for this service.
+#
+# WHAT IS CADDY?
+# Caddy is a web server that sits between the internet and your app.
+# When a browser requests your domain, Caddy receives it first, adds
+# security headers, checks the request size, then forwards it to your
+# FastAPI app running on port 8000.
+#
+# WHAT IS A REVERSE PROXY?
+# A "reverse proxy" means Caddy acts as a middleman:
+#   Browser → Caddy (port 443/HTTPS) → App (port 8000/HTTP)
+# The browser never talks to the app directly — Caddy handles HTTPS,
+# security, and routing.
+#
+# WHAT IS A TEMPLATE?
+# This file contains ${PROJECT_DOMAIN} and ${PROJECT_REPO} which are
+# PLACEHOLDER variables. At deploy time, the CI script replaces them
+# with real values from project.config using `sed` (a text replacement tool).
+# The rendered file is saved as /home/deploy/caddy/conf.d/${PROJECT_REPO}.caddy
+#
+# HOW CADDY FINDS THIS FILE:
+# Caddy's main config file (/home/deploy/caddy/Caddyfile) contains just:
+#   import /etc/caddy/conf.d/*.caddy
+# This tells Caddy: "load ALL .caddy files from that directory."
+# Each project drops ONE file there. Zero coupling between projects.
+#
 # This is a TEMPLATE rendered at deploy time by scripts/ci/deploy-app.sh
 # (and by local/setup.sh for local dev — but local doesn't use Caddy at all).
 #
