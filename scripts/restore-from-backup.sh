@@ -1,27 +1,19 @@
 #!/bin/bash
 # =============================================================================
-# restore-from-backup.sh — download a pg_dump from S3 and restore it.
+# restore-from-backup.sh — download a backup from S3 and restore it.
+#
+# Uses the backup Docker image (which has mc) for S3 access — no need to
+# install aws-cli or mc on your Mac.
 #
 # Usage:
-#   bash scripts/restore-from-backup.sh --date 2026-04-09
 #   bash scripts/restore-from-backup.sh --latest
-#   bash scripts/restore-from-backup.sh --latest --yes       # skip prompts
+#   bash scripts/restore-from-backup.sh --date 2026-04-12
 #   bash scripts/restore-from-backup.sh --file path/to/local.sql.gz
+#   bash scripts/restore-from-backup.sh --latest --yes       # skip prompts
 #
-# What it does:
-#   1. Downloads the specified backup from S3 (or uses a local file)
-#   2. Connects to the Patroni leader via SSH + HAProxy
-#   3. Drops and recreates the project database
-#   4. Restores the dump via psql
-#   5. Verifies the restore by counting rows in key tables
-#
-# PREREQUISITES:
-#   - SSH access to the servers (uses servers.config)
-#   - AWS CLI on your Mac: brew install awscli
-#   - BACKUP_S3_ACCESS_KEY + BACKUP_S3_SECRET_KEY exported (or set in env)
-#
-# SECURITY: credentials are NEVER written to disk. They're read from env
-# vars and passed to `aws` which uses them in-memory only.
+# After restore, the script:
+#   1. Re-runs all pending migrations (the backup may be from before a migration)
+#   2. Restarts app containers on both servers (clears stale connection pool)
 # =============================================================================
 
 set -euo pipefail
@@ -43,68 +35,77 @@ LOCAL_FILE=""
 ASSUME_YES="false"
 while [ $# -gt 0 ]; do
     case "$1" in
-        --date)  DATE="$2"; shift 2 ;;
+        --date)   DATE="$2"; shift 2 ;;
         --latest) LATEST="true"; shift ;;
-        --file)  LOCAL_FILE="$2"; shift 2 ;;
-        --yes)   ASSUME_YES="true"; shift ;;
-        -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+        --file)   LOCAL_FILE="$2"; shift 2 ;;
+        --yes)    ASSUME_YES="true"; shift ;;
+        -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac
 done
 
-# Validate S3 creds (accept either AWS_* or BACKUP_S3_* naming)
-if [ -z "${LOCAL_FILE}" ]; then
-    export AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-${BACKUP_S3_ACCESS_KEY:-}}"
-    export AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-${BACKUP_S3_SECRET_KEY:-}}"
-    if [ -z "${AWS_ACCESS_KEY_ID}" ] || [ -z "${AWS_SECRET_ACCESS_KEY}" ]; then
-        echo "FATAL: S3 credentials not set."
-        echo "  Export BACKUP_S3_ACCESS_KEY + BACKUP_S3_SECRET_KEY"
-        echo "  or AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY"
-        exit 1
-    fi
-fi
+# S3 credentials
+S3_ACCESS="${BACKUP_S3_ACCESS_KEY:-${AWS_ACCESS_KEY_ID:-}}"
+S3_SECRET="${BACKUP_S3_SECRET_KEY:-${AWS_SECRET_ACCESS_KEY:-}}"
 
-S3_PREFIX="s3://${BACKUP_S3_BUCKET}/${PROJECT_REPO}"
-RESTORE_FILE=""
+BACKUP_IMAGE="${IMAGE_REPO}-backup:latest"
+S3_PREFIX="rishi-yral/${PROJECT_REPO}"
+DOWNLOAD_PATH="/tmp/restore_${PROJECT_REPO}.sql.gz"
 
+# ----- Download the backup -----
 if [ -n "${LOCAL_FILE}" ]; then
     [ ! -f "${LOCAL_FILE}" ] && { echo "FATAL: file not found: ${LOCAL_FILE}"; exit 1; }
-    RESTORE_FILE="${LOCAL_FILE}"
-    echo "==> Restoring from local file: ${RESTORE_FILE}"
-elif [ "${LATEST}" = "true" ]; then
-    echo "==> Finding latest backup in ${S3_PREFIX}/daily/..."
-    LATEST_KEY=$(aws s3 ls "${S3_PREFIX}/daily/" --endpoint-url "${BACKUP_S3_ENDPOINT}" 2>/dev/null \
-        | awk '{print $NF}' | sort | tail -1)
-    [ -z "${LATEST_KEY}" ] && { echo "FATAL: no backups found in ${S3_PREFIX}/daily/"; exit 1; }
-    echo "    latest: ${LATEST_KEY}"
-    RESTORE_FILE="/tmp/${LATEST_KEY}"
-    aws s3 cp "${S3_PREFIX}/daily/${LATEST_KEY}" "${RESTORE_FILE}" \
-        --endpoint-url "${BACKUP_S3_ENDPOINT}"
-elif [ -n "${DATE}" ]; then
-    echo "==> Finding backup for date ${DATE}..."
-    MATCH=$(aws s3 ls "${S3_PREFIX}/daily/" --endpoint-url "${BACKUP_S3_ENDPOINT}" 2>/dev/null \
-        | awk '{print $NF}' | grep "^${DATE}" | sort | tail -1)
-    [ -z "${MATCH}" ] && { echo "FATAL: no backup found for date ${DATE}"; exit 1; }
-    echo "    found: ${MATCH}"
-    RESTORE_FILE="/tmp/${MATCH}"
-    aws s3 cp "${S3_PREFIX}/daily/${MATCH}" "${RESTORE_FILE}" \
-        --endpoint-url "${BACKUP_S3_ENDPOINT}"
-else
-    echo "Usage: bash scripts/restore-from-backup.sh --latest | --date YYYY-MM-DD | --file path"
+    DOWNLOAD_PATH="${LOCAL_FILE}"
+    echo "==> Using local file: ${DOWNLOAD_PATH}"
+elif [ -z "${S3_ACCESS}" ] || [ -z "${S3_SECRET}" ]; then
+    echo "FATAL: S3 credentials not set."
+    echo "  Export BACKUP_S3_ACCESS_KEY + BACKUP_S3_SECRET_KEY"
     exit 1
+else
+    echo "==> Finding backup in S3..."
+
+    # Use the backup Docker image (has mc) via SSH to rishi-1
+    BACKUP_FILE=""
+    if [ "${LATEST}" = "true" ]; then
+        BACKUP_FILE=$(ssh -i "${SSH_KEY}" "${DEPLOY_USER}@${SERVER_1_IP}" "
+            docker run --rm ${BACKUP_IMAGE} sh -c '
+                mc alias set h ${BACKUP_S3_ENDPOINT} ${S3_ACCESS} ${S3_SECRET} --api s3v4 >/dev/null 2>&1
+                mc ls h/${S3_PREFIX}/daily/ | awk \"{print \\\$NF}\" | sort | tail -1
+            '
+        ")
+    elif [ -n "${DATE}" ]; then
+        BACKUP_FILE=$(ssh -i "${SSH_KEY}" "${DEPLOY_USER}@${SERVER_1_IP}" "
+            docker run --rm ${BACKUP_IMAGE} sh -c '
+                mc alias set h ${BACKUP_S3_ENDPOINT} ${S3_ACCESS} ${S3_SECRET} --api s3v4 >/dev/null 2>&1
+                mc ls h/${S3_PREFIX}/daily/ | awk \"{print \\\$NF}\" | grep \"^${DATE}\" | sort | tail -1
+            '
+        ")
+    fi
+
+    [ -z "${BACKUP_FILE}" ] && { echo "FATAL: no backup found"; exit 1; }
+    echo "    found: ${BACKUP_FILE}"
+
+    # Download to rishi-1's /tmp
+    echo "==> Downloading ${BACKUP_FILE} to rishi-1..."
+    ssh -i "${SSH_KEY}" "${DEPLOY_USER}@${SERVER_1_IP}" "
+        docker run --rm -v /tmp:/download ${BACKUP_IMAGE} sh -c '
+            mc alias set h ${BACKUP_S3_ENDPOINT} ${S3_ACCESS} ${S3_SECRET} --api s3v4 >/dev/null 2>&1
+            mc cp h/${S3_PREFIX}/daily/${BACKUP_FILE} /download/restore.sql.gz
+        '
+    "
+    DOWNLOAD_PATH="/tmp/restore.sql.gz"
 fi
 
-# Show what we're about to do
-DUMP_SIZE=$(stat -c%s "${RESTORE_FILE}" 2>/dev/null || stat -f%z "${RESTORE_FILE}" 2>/dev/null)
+# ----- Confirmation -----
 echo
 echo "=========================================="
-echo " RESTORE PLAN"
-echo "  database:  ${POSTGRES_DB}"
-echo "  from:      ${RESTORE_FILE} ($(( DUMP_SIZE / 1024 )) KB)"
-echo "  server:    ${SERVER_1_IP} (via HAProxy)"
+echo " RESTORE: ${POSTGRES_DB}"
+echo " from:    ${BACKUP_FILE:-${LOCAL_FILE}}"
+echo " server:  ${SERVER_1_IP}"
 echo
-echo "  WARNING: this will DROP the existing database and"
-echo "  replace it with the backup contents."
+echo " WARNING: this will DROP the existing database,"
+echo " restore from the backup, then re-run any pending"
+echo " migrations to bring the schema up to date."
 echo "=========================================="
 
 if [ "${ASSUME_YES}" != "true" ]; then
@@ -112,57 +113,60 @@ if [ "${ASSUME_YES}" != "true" ]; then
     [ "${CONFIRM}" = "${POSTGRES_DB}" ] || { echo "Aborted."; exit 1; }
 fi
 
-# Find the Patroni leader and restore via psql
+# ----- Restore -----
 echo "==> Restoring..."
-ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no "${DEPLOY_USER}@${SERVER_1_IP}" bash <<REMOTE
+ssh -i "${SSH_KEY}" "${DEPLOY_USER}@${SERVER_1_IP}" bash <<REMOTE
 set -e
-# Find the leader container
-for C in \$(docker ps -qf name=${SWARM_STACK}_patroni-rishi); do
-    IS_LEADER=\$(docker exec "\$C" psql -h 127.0.0.1 -U postgres -tAc "SELECT pg_is_in_recovery();" 2>/dev/null)
+
+# Find leader
+LEADER=""
+for C in \$(docker ps -qf "name=${SWARM_STACK}_patroni-rishi"); do
+    PG=\$(docker exec "\$C" cat /run/secrets/postgres_password 2>/dev/null)
+    IS_LEADER=\$(docker exec -e PGPASSWORD="\$PG" "\$C" psql -h 127.0.0.1 -U postgres -tAc "SELECT pg_is_in_recovery();" 2>/dev/null)
     if [ "\$IS_LEADER" = "f" ]; then
         LEADER="\$C"
         break
     fi
 done
-[ -z "\${LEADER:-}" ] && { echo "FATAL: no leader found"; exit 1; }
+[ -z "\$LEADER" ] && { echo "FATAL: no leader"; exit 1; }
+PG=\$(docker exec "\$LEADER" cat /run/secrets/postgres_password 2>/dev/null)
 echo "leader: \$LEADER"
 
-# Drop + recreate the database
-docker exec "\$LEADER" psql -h 127.0.0.1 -U postgres -c "
-    SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '${POSTGRES_DB}' AND pid <> pg_backend_pid();
+# Terminate connections + drop + recreate
+docker exec -e PGPASSWORD="\$PG" "\$LEADER" psql -h 127.0.0.1 -U postgres -c "
+    SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+    WHERE datname = '${POSTGRES_DB}' AND pid <> pg_backend_pid();
 " 2>/dev/null || true
-docker exec "\$LEADER" psql -h 127.0.0.1 -U postgres -c "DROP DATABASE IF EXISTS ${POSTGRES_DB};"
-docker exec "\$LEADER" psql -h 127.0.0.1 -U postgres -c "CREATE DATABASE ${POSTGRES_DB};"
+docker exec -e PGPASSWORD="\$PG" "\$LEADER" psql -h 127.0.0.1 -U postgres -c "DROP DATABASE IF EXISTS ${POSTGRES_DB};"
+docker exec -e PGPASSWORD="\$PG" "\$LEADER" psql -h 127.0.0.1 -U postgres -c "CREATE DATABASE ${POSTGRES_DB};"
 echo "database recreated"
+
+# Restore from dump
+gunzip -c ${DOWNLOAD_PATH} | docker exec -i -e PGPASSWORD="\$PG" "\$LEADER" psql -h 127.0.0.1 -U postgres -d ${POSTGRES_DB} 2>&1 | tail -5
+echo "restore complete"
+
+# Verify
+echo "--- tables after restore ---"
+docker exec -e PGPASSWORD="\$PG" "\$LEADER" psql -h 127.0.0.1 -U postgres -d ${POSTGRES_DB} -c "\\dt"
+echo "--- schema_migrations ---"
+docker exec -e PGPASSWORD="\$PG" "\$LEADER" psql -h 127.0.0.1 -U postgres -d ${POSTGRES_DB} -c "SELECT * FROM schema_migrations ORDER BY filename;" 2>/dev/null || echo "(no schema_migrations table)"
 REMOTE
 
-# Upload the dump to the server, decompress, and restore via psql
-echo "==> Uploading dump to server..."
-scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no "${RESTORE_FILE}" \
-    "${DEPLOY_USER}@${SERVER_1_IP}:/tmp/restore_dump.sql.gz"
+# ----- Re-run migrations (backup may be from before a migration) -----
+echo "==> Re-running migrations to bring schema up to date..."
+ssh -i "${SSH_KEY}" "${DEPLOY_USER}@${SERVER_1_IP}" \
+    "cd /home/${DEPLOY_USER}/${PROJECT_REPO} && APP_DIR=/home/${DEPLOY_USER}/${PROJECT_REPO} bash scripts/ci/run-migrations.sh" 2>&1 || \
+    echo "⚠ Migration runner failed — may need manual intervention"
 
-ssh -i "${SSH_KEY}" "${DEPLOY_USER}@${SERVER_1_IP}" bash <<REMOTE
-set -e
-LEADER=""
-for C in \$(docker ps -qf name=${SWARM_STACK}_patroni-rishi); do
-    IS_LEADER=\$(docker exec "\$C" psql -h 127.0.0.1 -U postgres -tAc "SELECT pg_is_in_recovery();" 2>/dev/null)
-    [ "\$IS_LEADER" = "f" ] && { LEADER="\$C"; break; }
+# ----- Restart app containers -----
+echo "==> Restarting app containers (clearing stale connection pool)..."
+for IP in ${SERVER_1_IP} ${SERVER_2_IP}; do
+    ssh -i "${SSH_KEY}" "${DEPLOY_USER}@${IP}" "docker restart ${PROJECT_REPO} 2>/dev/null" && \
+        echo "  restarted on $(ssh -i "${SSH_KEY}" "${DEPLOY_USER}@${IP}" hostname)"
 done
 
-echo "restoring to \$LEADER..."
-gunzip -c /tmp/restore_dump.sql.gz | docker exec -i "\$LEADER" psql -h 127.0.0.1 -U postgres -d ${POSTGRES_DB} 2>&1 | tail -5
-rm -f /tmp/restore_dump.sql.gz
-
-echo "==> Verifying restore..."
-docker exec "\$LEADER" psql -h 127.0.0.1 -U postgres -d ${POSTGRES_DB} -c "\\dt" 2>/dev/null
-docker exec "\$LEADER" psql -h 127.0.0.1 -U postgres -d ${POSTGRES_DB} -c "SELECT count(*) AS rows FROM counter;" 2>/dev/null || true
-REMOTE
-
-# Clean up local temp file (unless it was a user-provided --file)
-if [ -z "${LOCAL_FILE}" ] && [ -f "${RESTORE_FILE}" ]; then
-    rm -f "${RESTORE_FILE}"
-fi
-
+sleep 5
 echo
-echo "==> Restore complete. Test the app:"
+echo "==> Restore complete. Verify:"
 echo "    curl https://${PROJECT_DOMAIN}/"
+echo "    curl https://${PROJECT_DOMAIN}/health"

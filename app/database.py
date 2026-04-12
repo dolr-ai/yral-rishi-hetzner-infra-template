@@ -143,10 +143,15 @@ def get_next_count() -> int:
 
 
 def check_db_health() -> bool:
-    """Quick liveness check — runs SELECT 1 with retry on dead connections."""
+    """
+    Health check that verifies BOTH database connectivity AND that the
+    business table exists. A previous version only did SELECT 1, which
+    returned "healthy" even when the counter table was missing (e.g. after
+    a failed restore or a dropped table). Now queries the actual table.
+    """
     def _do(conn):
         with conn.cursor() as cur:
-            cur.execute("SELECT 1")
+            cur.execute("SELECT 1 FROM counter LIMIT 1")
             cur.fetchone()
         return True
 
