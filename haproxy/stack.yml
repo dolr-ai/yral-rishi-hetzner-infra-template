@@ -1,39 +1,72 @@
-# Docker Stack file for HAProxy.
-# Deployed via CI with: docker stack deploy --compose-file haproxy-stack.yml ${SWARM_STACK}
+# ---------------------------------------------------------------------------
+# haproxy/stack.yml — Docker Swarm stack file for HAProxy.
 #
+# WHAT IS HAPROXY?
+# HAProxy is a load balancer — it sits between the app and the database
+# and routes SQL connections to the CURRENT PostgreSQL leader. When the
+# leader changes (failover), HAProxy detects it within 3 seconds and
+# routes to the new leader. The app never needs to know which server
+# is the leader — it always connects to "haproxy-rishi-1:5432".
+#
+# WHAT IS A SWARM STACK FILE?
+# A YAML file that tells Docker Swarm which containers to run, where to
+# run them, and how to connect them. "docker stack deploy" reads this
+# file and creates/updates the services across all servers.
+#
+# HOW MANY HAPROXY INSTANCES?
+# Two — one on rishi-1 and one on rishi-2 (the app servers). Each app
+# container connects to its LOCAL HAProxy instance.
+# rishi-3 doesn't run HAProxy because it doesn't run the app.
+#
+# NETWORK:
 # HAProxy is ONLY on db-internal (the private overlay network).
-# It reaches Patroni nodes for health-checks and routes SQL connections
-# to the current primary. The counter app also joins db-internal
-# (via --network db-internal in docker compose) so it can reach HAProxy.
-#
-# WHY two pinned services instead of replicas=2?
-# With replicas=2, Swarm might place both on the same server (if one server is
-# the most available). We need exactly one HAProxy per app server.
-# Pinning with placement constraints guarantees one per server.
-#
-# WHY Swarm configs for haproxy.cfg?
-# Swarm configs distribute a file to containers without mounting host paths.
-# The CI copies haproxy.cfg to the manager, then stack deploy distributes it.
+# It reaches Patroni nodes for health checks and routes SQL connections
+# to the current leader. The app also joins db-internal so it can reach
+# HAProxy.
+# ---------------------------------------------------------------------------
 
+# Docker Compose format version (3.8 supports all Swarm features we use)
 version: "3.8"
 
+# SERVICES define which containers to run.
+# Each service becomes a running container managed by Docker Swarm.
 services:
+
+  # ----- HAProxy on rishi-1 -----
   haproxy-rishi-1:
+    # Use the official HAProxy 2.8 image (Alpine = minimal Linux, ~10MB)
     image: haproxy:2.8-alpine
+
+    # CONFIGS: mount the haproxy.cfg file inside the container.
+    # Docker Swarm distributes this file to the container automatically.
+    # "source: haproxy_cfg" references the config defined below.
+    # "target: ..." is where the file appears inside the container.
     configs:
       - source: haproxy_cfg
         target: /usr/local/etc/haproxy/haproxy.cfg
+
+    # Join the db-internal overlay network (the private database network)
     networks:
       - db-internal
+
+    # DEPLOY section: Swarm-specific settings (not used by docker compose)
     deploy:
+      # PLACEMENT CONSTRAINT: run this container ONLY on the server
+      # labeled "server=rishi-1". This ensures exactly one HAProxy
+      # per app server (not both on the same server by accident).
       placement:
         constraints:
           - node.labels.server == rishi-1
+
+      # RESTART POLICY: if HAProxy crashes, Swarm restarts it.
+      # max_attempts=10: give up after 10 restarts within 120 seconds
+      # (prevents infinite restart loops from burning CPU)
       restart_policy:
         condition: any
         max_attempts: 10
         window: 120s
 
+  # ----- HAProxy on rishi-2 (identical config, different server) -----
   haproxy-rishi-2:
     image: haproxy:2.8-alpine
     configs:
@@ -50,14 +83,24 @@ services:
         max_attempts: 10
         window: 120s
 
+# CONFIGS section: defines files that Swarm distributes to containers.
+# Unlike volumes (which mount host directories), configs are managed by
+# Swarm and work across all nodes in the cluster.
 configs:
   haproxy_cfg:
+    # The source file on the host (copied to the server by CI via SCP)
     file: ./haproxy.cfg
 
+# NETWORKS section: defines which Docker networks the services join.
+# This must match the network definitions in etcd/stack.yml and
+# patroni/stack.yml (they're all deployed as ONE stack, so the
+# definitions are merged).
 networks:
-  # Same definition as in etcd/stack.yml and patroni/stack.yml — they
-  # are merged into one stack so all definitions must agree.
   db-internal:
+    # "overlay" = spans multiple servers (not just one host)
     driver: overlay
+    # "attachable" = non-Swarm containers (like the app) can also join
     attachable: true
+    # "name" = the actual network name on Docker. Without this, Docker
+    # would prefix it with the stack name (too long for our stack names).
     name: ${OVERLAY_NETWORK}
