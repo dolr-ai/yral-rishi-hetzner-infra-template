@@ -38,8 +38,12 @@ class _FakeDB:
 def fake_db(monkeypatch):
     fake = _FakeDB()
     mod = types.ModuleType("database")
-    mod.get_next_count = fake.get_next_count
-    mod.check_db_health = fake.check_db_health
+    # Automatically expose ALL public methods from _FakeDB on the mock module.
+    # This means adding a new function to database.py + _FakeDB "just works"
+    # without also having to add mod.new_function = fake.new_function here.
+    for attr in dir(fake):
+        if not attr.startswith("_"):
+            setattr(mod, attr, getattr(fake, attr))
     monkeypatch.setitem(sys.modules, "database", mod)
     return fake
 
