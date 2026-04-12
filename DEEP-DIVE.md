@@ -480,6 +480,238 @@ means "if row with id=1 already exists, do nothing" — also safe to re-run.
 
 ---
 
+## Visual diagrams
+
+### Diagram 1: What happens when a user visits the URL
+
+```
+    USER'S BROWSER
+         |
+         | 1. "What IP is rishi-hetzner-infra-template.rishi.yral.com?"
+         v
+    CLOUDFLARE DNS
+         |
+         | 2. "Here are TWO IPs: 138.201.137.181 and 136.243.150.84"
+         |    (browser picks one randomly)
+         v
+    CLOUDFLARE EDGE (HTTPS termination)
+         |
+         | 3. Forwards request to the chosen server
+         v
+   +-----------+                              +-----------+
+   |  RISHI-1  |       (or, randomly)         |  RISHI-2  |
+   |           |                              |           |
+   |  Caddy    |                              |  Caddy    |
+   |    |      |                              |    |      |
+   |    v      |                              |    v      |
+   |  App      |                              |  App      |
+   |  (FastAPI)|                              |  (FastAPI)|
+   |    |      |                              |    |      |
+   |    v      |                              |    v      |
+   |  HAProxy -+----- overlay network --------+- HAProxy  |
+   |    |      |     (private, encrypted)     |    |      |
+   +----|------+                              +----|------+
+        |                                          |
+        +---------- routes to LEADER --------------+
+                         |
+              +----------+----------+
+              |          |          |
+         +---------+ +--------+ +--------+
+         | rishi-1 | | rishi-2| | rishi-3|
+         | Patroni | | Patroni| | Patroni|
+         |         | | LEADER | |        |
+         | replica | |        | | replica|
+         +---------+ +--------+ +--------+
+              |          |           |
+              +--- streaming replication ---+
+```
+
+### Diagram 2: What happens when you push code (CI/CD pipeline)
+
+```
+    YOU: git push origin main
+         |
+         v
+    GITHUB ACTIONS starts the workflow
+         |
+         +---> Job 0: READ CONFIG
+         |         reads project.config → WITH_DATABASE flag
+         |
+         +---> Job 1: GITLEAKS (parallel)     Job 2: TESTS (parallel)
+         |         scan git history              pytest + integrity check
+         |         for leaked passwords          for broken configs
+         |              |                             |
+         |              +-------- both pass ----------+
+         |                           |
+         +---> Job 3: BUILD + PUSH
+         |         docker build → 3 images:
+         |           app image     (your Python code)
+         |           patroni image (PostgreSQL + Patroni)
+         |           backup image  (pg_dump + mc)
+         |         push all 3 to GHCR
+         |         Trivy scan → CRITICAL CVE = FAIL
+         |                           |
+         +---> Job 4: DEPLOY DB STACK (if WITH_DATABASE=true)
+         |         SSH to rishi-1 (Swarm manager)
+         |         docker stack deploy:
+         |           3x etcd    (leader election)
+         |           3x Patroni (PostgreSQL HA)
+         |           2x HAProxy (DB load balancer)
+         |                           |
+         +---> Job 5: DEPLOY APP (canary pattern)
+                  |
+                  +---> RISHI-1 (canary — goes first)
+                  |       1. SCP files to server
+                  |       2. Run SQL MIGRATIONS (before new code!)
+                  |       3. docker compose up -d (new image)
+                  |       4. Wait for healthcheck = "healthy"
+                  |       5. Curl /health through Caddy
+                  |       6. If UNHEALTHY → auto-rollback!
+                  |       7. If HEALTHY → record tag, update Caddy
+                  |              |
+                  |         (only if rishi-1 FULLY succeeded)
+                  |              |
+                  +---> RISHI-2 (same steps)
+                          |
+                     DEPLOY COMPLETE
+```
+
+### Diagram 3: What happens during a database failover
+
+```
+    BEFORE: rishi-2 is the leader, rishi-1 and rishi-3 are replicas
+
+    rishi-1 (replica)  ←── streaming ──→  rishi-2 (LEADER)  ←── streaming ──→  rishi-3 (replica)
+                                              |
+                                          CRASH! 💥
+                                              |
+    STEP 1: etcd detects rishi-2 is gone (within 30 seconds)
+    STEP 2: Patroni on rishi-1 and rishi-3 VOTE (quorum: 2 of 3 agree)
+    STEP 3: rishi-1 is PROMOTED to leader (has the most recent data)
+    STEP 4: HAProxy detects new leader via /master health check (~3 seconds)
+    STEP 5: App's connection pool retries → HAProxy routes to rishi-1 → success
+
+    AFTER: rishi-1 is the new leader
+
+    rishi-1 (NEW LEADER)  ←── streaming ──→  rishi-3 (replica)
+
+    rishi-2 comes back → Patroni re-joins as replica → streams from rishi-1
+```
+
+### Diagram 4: How migrations work (expand-contract)
+
+```
+    DEPLOY 1: ADD NEW COLUMN (expand — safe)
+
+    ┌──────────────────────────────────────────────────────┐
+    │ BEFORE                                               │
+    │   counter table: [id, value]                         │
+    │   app code: uses id, value                           │
+    │   rishi-1: OLD code    rishi-2: OLD code             │
+    └──────────────────────────────────────────────────────┘
+                              |
+                    migration runs on rishi-1
+                    ALTER TABLE counter ADD COLUMN email;
+                              |
+    ┌──────────────────────────────────────────────────────┐
+    │ DURING DEPLOY                                        │
+    │   counter table: [id, value, email]  ← expanded!     │
+    │   rishi-1: OLD code    rishi-2: OLD code             │
+    │   (old code doesn't use email — that's fine)         │
+    └──────────────────────────────────────────────────────┘
+                              |
+                    new app image starts on rishi-1
+                              |
+    ┌──────────────────────────────────────────────────────┐
+    │ AFTER                                                │
+    │   counter table: [id, value, email]                  │
+    │   rishi-1: NEW code (uses email)                     │
+    │   rishi-2: NEW code (uses email)                     │
+    │   ZERO DOWNTIME ✓                                    │
+    └──────────────────────────────────────────────────────┘
+
+
+    DEPLOY 2: REMOVE OLD COLUMN (contract — after all servers have new code)
+
+    migration: ALTER TABLE counter DROP COLUMN old_name;
+    (only safe because NO code references old_name anymore)
+```
+
+### Diagram 5: Backup and restore flow
+
+```
+    DAILY (3:00 AM UTC via GitHub Actions):
+
+    GitHub Actions
+         |
+         | SSH to rishi-1
+         v
+    docker run backup-container --network overlay
+         |
+         | pg_dump via HAProxy → leader → SQL dump
+         v
+    gzip -9 (compress ~10x)
+         |
+         | mc cp (MinIO Client upload)
+         v
+    Hetzner Object Storage
+    s3://rishi-yral/
+      └── yral-my-service/        ← per-service prefix (isolated!)
+            ├── daily/
+            │     ├── 2026-04-12_030000.sql.gz
+            │     ├── 2026-04-11_030000.sql.gz   ← keep last 7
+            │     └── ...
+            └── weekly/
+                  ├── 2026-04-06.sql.gz          ← keep last 4
+                  └── ...
+
+
+    RESTORE (manual, when needed):
+
+    bash scripts/restore-from-backup.sh --latest
+         |
+         | 1. Download backup from S3
+         | 2. DROP DATABASE + CREATE DATABASE
+         | 3. Restore from dump (psql < dump.sql.gz)
+         | 4. Re-run pending migrations (auto!)
+         | 5. Restart app containers (clear pool)
+         v
+    Service back online at the backup's point in time
+```
+
+### Diagram 6: Project isolation (why services can't interfere)
+
+```
+    SAME 3 SERVERS, but every layer is isolated:
+
+    ┌─────────────────────────────────────────────────────────┐
+    │                     rishi-1 / rishi-2 / rishi-3         │
+    │                                                         │
+    │  SERVICE A (my-service)          SERVICE B (nsfw-svc)   │
+    │  ├── Caddy snippet:              ├── Caddy snippet:     │
+    │  │   yral-my-service.caddy       │   yral-nsfw-svc.caddy│
+    │  ├── App container:              ├── App container:      │
+    │  │   yral-my-service             │   yral-nsfw-svc       │
+    │  ├── Swarm stack:                ├── Swarm stack:        │
+    │  │   my-service-db               │   nsfw-svc-db         │
+    │  ├── Overlay network:            ├── Overlay network:    │
+    │  │   my-service-db-internal      │   nsfw-svc-db-internal│
+    │  │   (CANNOT see B's network)    │   (CANNOT see A's)   │
+    │  ├── Secrets:                    ├── Secrets:            │
+    │  │   my-service-db_pg_pass       │   nsfw-svc-db_pg_pass │
+    │  ├── Database:                   ├── Database:           │
+    │  │   my_service_db               │   nsfw_svc_db         │
+    │  ├── etcd scope:                 ├── etcd scope:         │
+    │  │   my-service-cluster          │   nsfw-svc-cluster    │
+    │  └── S3 backup prefix:           └── S3 backup prefix:  │
+    │      rishi-yral/yral-my-service/     rishi-yral/yral-nsfw│
+    │                                                         │
+    │  A deploys → B is NOT affected.                         │
+    │  A crashes → B keeps serving.                           │
+    │  A's backup → only A's data.                            │
+    └─────────────────────────────────────────────────────────┘
+```
+
 ## Part 3: What happens when you push code
 
 When you `git push` to the `main` branch, GitHub Actions runs the CI/CD
