@@ -1,3 +1,24 @@
+# ---------------------------------------------------------------------------
+# docker-compose.yml — tells Docker HOW to run the app container.
+#
+# WHAT IS DOCKER COMPOSE?
+# Docker Compose reads this YAML file and starts/stops containers based on
+# what's defined here. It's like a recipe: "run THIS image, with THESE
+# environment variables, on THESE networks, with THESE resource limits."
+#
+# WHAT IS YAML?
+# YAML is a configuration file format. It uses indentation (spaces) to
+# show structure. Key-value pairs look like "key: value". Lists use "- item".
+# Lines starting with # are comments (ignored by Docker).
+#
+# WHAT DO THE ${VAR} THINGS MEAN?
+# They're variables that get replaced with real values from project.config.
+# Before running "docker compose up", the deploy script does:
+#   set -a; source project.config; set +a
+# This loads all the KEY=value pairs into the shell environment, and
+# Docker Compose substitutes ${VAR} with the real values.
+# Example: ${IMAGE_REPO} becomes "ghcr.io/dolr-ai/yral-rishi-hetzner-infra-template"
+#
 # Counter app — runs on rishi-1 and rishi-2 via plain docker-compose (not Swarm).
 # Also runs locally via local/docker-compose.yml.
 #
