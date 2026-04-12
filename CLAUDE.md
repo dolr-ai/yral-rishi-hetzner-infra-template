@@ -139,6 +139,8 @@ backward-compatible with the currently-running code (expand-contract pattern).
 - No public debug endpoints
 
 See `SECURITY.md` for the full threat model + deferred TODOs.
+See `RUNBOOK.md` for step-by-step incident playbooks (leader failover, replica
+recovery, Caddy down, etcd degraded, backup failure, restore, failed deploy).
 
 ---
 
