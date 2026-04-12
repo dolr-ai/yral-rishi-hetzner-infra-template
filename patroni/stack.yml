@@ -156,16 +156,11 @@ networks:
     attachable: true
     name: ${OVERLAY_NETWORK}
 
-# Volumes are created EXTERNALLY by deploy-db-stack.sh with a "keep" label
-# that prevents `docker system prune --volumes` from deleting them. See
-# deploy-db-stack.sh for the docker volume create commands.
+# IMPORTANT: these volumes contain ALL database data. `docker system prune
+# --volumes` will DELETE them if the container happens to be stopped during
+# a rolling update. The daily backup to S3 is the primary data protection.
+# See SECURITY.md "deferred TODOs" for bind-mount alternative.
 volumes:
   patroni-rishi-1-data:
-    external: true
-    name: ${SWARM_STACK}_patroni-rishi-1-data
   patroni-rishi-2-data:
-    external: true
-    name: ${SWARM_STACK}_patroni-rishi-2-data
   patroni-rishi-3-data:
-    external: true
-    name: ${SWARM_STACK}_patroni-rishi-3-data
