@@ -1,64 +1,132 @@
-# Docker Stack file for the etcd cluster.
-# Deployed via CI with: docker stack deploy --compose-file etcd-stack.yml ${SWARM_STACK}
+# ---------------------------------------------------------------------------
+# etcd/stack.yml — Docker Swarm stack for the 3-node etcd cluster.
 #
-# All ${VAR} interpolations come from the SHELL ENV of the calling process.
-# scripts/ci/deploy-db-stack.sh sources project.config with `set -a` BEFORE
-# calling docker stack deploy, which makes every line in project.config
-# automatically available to docker compose's interpolation engine.
+# WHAT IS etcd?
+# etcd is a distributed key-value store (like a shared notebook that all
+# 3 servers can read and write to). Patroni uses etcd to:
+#   - Store which server is the current database leader
+#   - Coordinate leader elections when the leader crashes
+#   - Store cluster configuration (replication settings, etc.)
 #
-# WHY a stack file instead of docker-compose?
-# Docker Swarm's "stack" is the multi-server equivalent of docker-compose.
-# Stack files support two things compose files don't:
-#   1. "deploy.placement.constraints" — pin a container to a specific server
-#   2. Overlay networks — private encrypted networking across servers
+# WHY 3 etcd NODES?
+# For the same reason as Patroni — QUORUM. 2 out of 3 nodes must agree
+# on any decision. This prevents "split-brain" (two nodes both thinking
+# they're right) during network partitions.
 #
-# WHY 3 separate services (etcd-rishi-1, etcd-rishi-2, etcd-rishi-3)?
-# etcd is a cluster where each node has its own identity and data directory.
-# Each node must run on its own server. We use placement constraints to
-# enforce this: "etcd-rishi-1 MUST run on the node labeled server=rishi-1."
+# HOW IS THIS FILE USED?
+# CI runs: docker stack deploy -c etcd-stack.yml <stack-name>
+# This creates 3 etcd containers, one on each server, connected via
+# the private overlay network (db-internal).
 #
-# WHY no "ports:" here?
-# etcd is only on the db-internal overlay network — invisible to the internet.
-# Only other containers on db-internal (Patroni, HAProxy) can reach it.
-# This is the whole point of the overlay: no UFW rules, no public exposure.
+# WHAT IS A DOCKER SWARM STACK?
+# A way to deploy multiple containers across multiple servers using a
+# YAML file. Similar to docker-compose but works across a CLUSTER of
+# servers, not just one machine.
+#
+# WHAT ARE THE ${VAR} THINGS?
+# Variables from project.config. Before calling "docker stack deploy",
+# the deploy script runs "set -a; source project.config; set +a" which
+# loads all KEY=value pairs into the shell. Docker Swarm then substitutes
+# ${VAR} with the real values.
+#
+# WHY NO "ports:" SECTION?
+# etcd is ONLY on the db-internal overlay network — invisible from the
+# internet. Only Patroni and HAProxy (also on db-internal) can reach it.
+# This is a security feature: the coordination service is never exposed.
+# ---------------------------------------------------------------------------
 
+# Docker Compose format version (3.8 supports all Swarm features we use)
 version: "3.8"
 
+# SERVICES: each service becomes a running container on a specific server
 services:
+
+  # ----- etcd on rishi-1 -----
   etcd-rishi-1:
+    # Official etcd Docker image from CoreOS (the company that created etcd)
+    # v3.5.16 is a stable release
     image: quay.io/coreos/etcd:v3.5.16
+
+    # ENVIRONMENT VARIABLES tell etcd how to configure itself.
+    # Each etcd node needs to know:
+    #   - Its own name and addresses
+    #   - The addresses of ALL other nodes in the cluster
+    #   - A token that identifies this cluster (prevents accidental merges)
     environment:
+      # This node's name (must be unique within the cluster)
       ETCD_NAME: rishi-1
+
+      # Where to store data files inside the container
       ETCD_DATA_DIR: /etcd-data
-      # LISTEN on all interfaces inside the container
+
+      # LISTEN: which addresses etcd accepts connections on.
+      # "0.0.0.0" = all network interfaces inside the container
+      # Port 2379 = client connections (Patroni connects here)
+      # Port 2380 = peer connections (other etcd nodes connect here)
       ETCD_LISTEN_CLIENT_URLS: http://0.0.0.0:2379
       ETCD_LISTEN_PEER_URLS: http://0.0.0.0:2380
-      # ADVERTISE using service name — Swarm DNS resolves "etcd-rishi-1" to
-      # this container's overlay IP. Other etcd nodes use this to find each other.
+
+      # ADVERTISE: the addresses this node tells OTHER nodes to use.
+      # "etcd-rishi-1" is a Docker service name that resolves via the
+      # overlay network's DNS to this container's IP address.
       ETCD_ADVERTISE_CLIENT_URLS: http://etcd-rishi-1:2379
       ETCD_INITIAL_ADVERTISE_PEER_URLS: http://etcd-rishi-1:2380
+
+      # The FULL CLUSTER membership list. ALL 3 nodes must have the SAME
+      # list so they can find each other on first startup.
+      # Format: "name=peer_url,name=peer_url,name=peer_url"
       ETCD_INITIAL_CLUSTER: "rishi-1=http://etcd-rishi-1:2380,rishi-2=http://etcd-rishi-2:2380,rishi-3=http://etcd-rishi-3:2380"
+
+      # "new" = this is a brand-new cluster (not joining an existing one)
       ETCD_INITIAL_CLUSTER_STATE: new
+
+      # A unique token for THIS cluster. Prevents two different projects'
+      # etcd clusters from accidentally merging. Comes from project.config.
       ETCD_INITIAL_CLUSTER_TOKEN: ${ETCD_TOKEN}
+
+    # VOLUMES: persistent storage for etcd's data.
+    # "etcd-rishi-1-data:/etcd-data" means:
+    #   - Docker creates a named volume called "etcd-rishi-1-data" (or reuses it)
+    #   - Mounts it inside the container at /etcd-data
+    #   - Data survives container restarts (it's stored on the host's disk)
     volumes:
       - etcd-rishi-1-data:/etcd-data
+
+    # Join the private overlay network (invisible from the internet)
     networks:
       - db-internal
+
+    # DEPLOY: Swarm-specific settings
     deploy:
+      # Run this container ONLY on the server labeled "server=rishi-1"
+      # (labels are set by scripts/swarm-setup.sh or scripts/add-server.sh)
       placement:
         constraints:
           - node.labels.server == rishi-1
+
+      # If the container crashes, Swarm restarts it automatically.
+      # max_attempts=10, window=120s: give up after 10 restarts in 2 minutes
+      # (prevents infinite restart loops from burning CPU)
       restart_policy:
         condition: any
         max_attempts: 10
         window: 120s
-      # Rolling update — same reasoning as Patroni: etcd needs quorum 2/3
+
+      # ROLLING UPDATE: when the image changes, update containers ONE AT A TIME.
+      # WHY? etcd needs 2 of 3 nodes running to function (quorum).
+      # If Swarm restarted all 3 simultaneously, etcd would lose quorum and
+      # Patroni couldn't elect a database leader.
+      #   parallelism: 1    = update 1 container at a time
+      #   delay: 30s        = wait 30 seconds between updates
+      #   order: stop-first = stop the old container before starting the new one
+      #   failure_action: rollback = if the new version fails, go back to the old one
       update_config:
         parallelism: 1
         delay: 30s
         order: stop-first
         failure_action: rollback
 
+  # ----- etcd on rishi-2 (identical config, different server) -----
   etcd-rishi-2:
     image: quay.io/coreos/etcd:v3.5.16
     environment:
@@ -89,6 +157,7 @@ services:
         order: stop-first
         failure_action: rollback
 
+  # ----- etcd on rishi-3 (identical config, different server) -----
   etcd-rishi-3:
     image: quay.io/coreos/etcd:v3.5.16
     environment:
@@ -119,20 +188,21 @@ services:
         order: stop-first
         failure_action: rollback
 
+# NETWORKS: defines the Docker networks the services join.
+# This overlay network spans ALL 3 servers. It's private (not reachable
+# from the internet) and encrypted (data in transit between servers).
 networks:
-  # Per-project overlay network — created and managed BY THIS STACK.
-  # WHY per-project instead of a shared network?
-  # Multiple stacks on the same overlay network can have DNS resolution
-  # conflicts when they share short service names like "etcd-rishi-1".
-  # Per-project networks isolate them completely. The `name:` field is
-  # the actual Docker network name (the YAML key `db-internal` is just
-  # this file's local reference). The app's docker-compose.yml uses
-  # the same `name:` to attach to it.
   db-internal:
+    # "overlay" = a virtual network that spans multiple physical servers
     driver: overlay
+    # "attachable" = non-Swarm containers (like the app) can also join
     attachable: true
+    # "name" = the actual Docker network name. Without this, Docker
+    # prefixes it with the stack name, which can exceed 63 chars.
     name: ${OVERLAY_NETWORK}
 
+# VOLUMES: persistent storage for each etcd node's data.
+# Named volumes survive container restarts and image updates.
 volumes:
   etcd-rishi-1-data:
   etcd-rishi-2-data:
