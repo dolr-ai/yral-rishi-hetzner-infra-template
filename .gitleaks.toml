@@ -1,17 +1,55 @@
-# gitleaks config — extends the default ruleset.
-# Run locally:  gitleaks detect --source . --config .gitleaks.toml
+# ---------------------------------------------------------------------------
+# .gitleaks.toml — configuration for the gitleaks secret scanner.
+#
+# WHAT IS GITLEAKS?
+# Gitleaks scans your ENTIRE git history (every commit ever made) for
+# accidentally committed passwords, API keys, tokens, etc. If it finds
+# something that looks like a secret, it fails the CI build.
+#
+# This file tells gitleaks:
+#   1. Use the default rules (catches most common secret patterns)
+#   2. IGNORE certain strings that LOOK like secrets but aren't
+#      (placeholder values in config files, example URLs in docs)
+#
+# HOW TO RUN LOCALLY:
+#   gitleaks detect --source . --config .gitleaks.toml
+#
+# TOML is a configuration file format (like JSON but more readable).
+# [sections] are groups of settings. Key = value pairs set options.
+# '''...''' is a multi-line string (triple quotes).
+# ---------------------------------------------------------------------------
+
+# Use gitleaks' built-in rules for detecting common secret patterns
+# (AWS keys, GitHub tokens, private keys, etc.)
 [extend]
 useDefault = true
 
-# Allow the placeholder strings used in committed config files.
+# ALLOWLIST: strings that gitleaks should NOT flag as secrets.
+# These are false positives — they LOOK like secrets but aren't.
 [allowlist]
 description = "Known-safe placeholders and example values"
+
+# Regex patterns to ignore. These are "regular expressions" — patterns
+# that match text. If a detected "secret" matches one of these patterns,
+# gitleaks skips it.
 regexes = [
+  # This placeholder string appears in patroni/patroni.yml. It's not a
+  # real scope name — it gets overridden by the PATRONI_SCOPE env var.
   '''PLACEHOLDER_OVERRIDDEN_BY_PATRONI_SCOPE_ENV''',
-  '''postgresql://postgres:POSTGRES_PASSWORD@''',  # docs example
+
+  # This appears in documentation as an EXAMPLE database URL.
+  # It's not a real password — just a placeholder in docs.
+  '''postgresql://postgres:POSTGRES_PASSWORD@''',
 ]
+
+# File paths to skip entirely. Gitleaks won't scan files matching these.
 paths = [
+  # Markdown docs often contain example passwords/URLs — not real secrets
   '''(.*?)\.md$''',
-  '''local/secrets/.*''',  # local-only, gitignored
-  '''secrets/.*''',        # CI-only, gitignored
+
+  # Local development secrets (gitignored, never committed)
+  '''local/secrets/.*''',
+
+  # CI deployment secrets (gitignored, never committed)
+  '''secrets/.*''',
 ]

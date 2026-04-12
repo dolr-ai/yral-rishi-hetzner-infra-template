@@ -1,4 +1,27 @@
+# ---------------------------------------------------------------------------
+# requirements.txt — Python packages (libraries) that the app needs to run.
+#
+# "pip install -r requirements.txt" reads this file and installs everything.
+# Each line is: package_name==exact_version
+#
+# WHY pin exact versions? Without ==, pip installs the LATEST version,
+# which might break your app if the library changes. Pinning ensures
+# every developer and every server runs the EXACT same code.
+# ---------------------------------------------------------------------------
+
+# FastAPI — the web framework. Handles HTTP requests, routes URLs to
+# Python functions, converts Python dicts to JSON responses.
 fastapi==0.115.12
+
+# Uvicorn — the web server that RUNS FastAPI. Listens on port 8000
+# and feeds incoming HTTP requests to FastAPI.
 uvicorn==0.34.0
+
+# Sentry SDK — error tracking. Catches crashes and sends them to
+# apm.yral.com. The [fastapi] extra adds FastAPI-specific integration.
 sentry-sdk[fastapi]==2.22.0
+
+# psycopg2 — the Python adapter for PostgreSQL. Lets Python connect
+# to the database, run SQL queries, and get results back.
+# "binary" = pre-compiled, no build tools needed.
 psycopg2-binary==2.9.10

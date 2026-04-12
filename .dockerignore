@@ -1,21 +1,54 @@
-# Prevent secrets, git history, and dev artifacts from being sent to the
-# Docker build context. Without this file, `docker build .` sends EVERYTHING
-# in the repo — including .bootstrap-secrets/, secrets/, .git/, etc.
+# ---------------------------------------------------------------------------
+# .dockerignore — tells Docker which files to SKIP when building an image.
+#
+# When you run "docker build .", Docker sends ALL files in the current
+# directory to the Docker daemon (the "build context"). Without this file,
+# that includes .git/ (hundreds of MB of history), secrets/, tests/, etc.
+#
+# This file works exactly like .gitignore but for Docker builds.
+# Every pattern listed here is EXCLUDED from the build context.
+#
+# WHY THIS MATTERS:
+#   - .bootstrap-secrets/ and secrets/ contain PASSWORDS. Without this file,
+#     they'd be sent to the Docker daemon (even if not COPY'd into the image).
+#   - .git/ can be 100+ MB. Skipping it makes builds faster.
+#   - tests/ and scripts/ aren't needed in the production image.
+# ---------------------------------------------------------------------------
+
+# Git history — not needed in the Docker image, and can be very large
 .git
+
+# GitHub Actions workflows — only used by CI, not by the running app
 .github
+
+# Local secrets — NEVER send these to the Docker build context
 .bootstrap-secrets
 secrets
+
+# Local development files — not needed in production
 local
 tests
 scripts
+
+# Documentation — not needed in the running container
 *.md
+
+# Config files — not needed in the image (they're used by CI/scripts, not the app)
 .gitignore
 .gitleaks.toml
 .dockerignore
+
+# Python bytecode — regenerated at runtime
 __pycache__
 *.pyc
+
+# Python virtual environments
 .venv
 venv
+
+# macOS metadata
 .DS_Store
+
+# Editor settings
 .idea
 .vscode
