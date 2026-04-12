@@ -112,5 +112,18 @@ else
     pass "skipping (this IS the template)"
 fi
 
+echo "==> 10. Backup config — S3 endpoint is not a placeholder"
+# project.config ships with a placeholder endpoint. If backup.yml runs
+# without a real endpoint, it silently fails. This check catches it early.
+if [ "${WITH_DATABASE}" = "true" ]; then
+    S3_EP=$(grep '^BACKUP_S3_ENDPOINT=' project.config | cut -d= -f2)
+    if [ -z "$S3_EP" ] || [ "$S3_EP" = "https://REPLACE_ME" ]; then
+        fail "BACKUP_S3_ENDPOINT is empty or still a placeholder — backups won't work"
+    fi
+    pass "backup S3 endpoint configured"
+else
+    pass "stateless mode — skipping backup check"
+fi
+
 echo
 echo "All template integrity checks passed."
