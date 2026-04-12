@@ -138,11 +138,17 @@ jobs:
             LEADER=$(echo "$LIST" | grep -c "Leader" || true)
             # Count how many nodes have "start failed" (crashed and couldn't restart)
             FAILED=$(echo "$LIST" | grep -c "start failed" || true)
+            # Count replicas stuck on a wrong timeline (state "running" but not
+            # "streaming"). After a failover, a replica can get stuck on the OLD
+            # leader's timeline — it shows "running" but isn't replicating.
+            # We detect this by counting replicas that are NOT streaming AND NOT
+            # the leader AND NOT in "start failed" (those are counted separately).
+            RUNNING_NOT_STREAMING=$(echo "$LIST" | grep -v "Leader" | grep -v "streaming" | grep -v "start failed" | grep -c "running" || true)
             echo ""
             # Evaluate the cluster health:
-            if [ "$LEADER" -ge 1 ] && [ "$STREAMING" -ge 2 ] && [ "$FAILED" -eq 0 ]; then
-              # IDEAL: 1 leader + 2 streaming replicas + 0 failures
-              echo "✓ Patroni healthy: ${LEADER} leader, ${STREAMING} streaming, ${FAILED} failed"
+            if [ "$LEADER" -ge 1 ] && [ "$STREAMING" -ge 2 ] && [ "$FAILED" -eq 0 ] && [ "$RUNNING_NOT_STREAMING" -eq 0 ]; then
+              # IDEAL: 1 leader + 2 streaming replicas + 0 failures + 0 stale
+              echo "✓ Patroni healthy: ${LEADER} leader, ${STREAMING} streaming, ${FAILED} failed, ${RUNNING_NOT_STREAMING} stale"
             elif [ "$LEADER" -ge 1 ] && [ "$STREAMING" -ge 1 ]; then
               # DEGRADED: leader exists but only 1 replica is streaming (1 node is down).
               # This IS a failure — the cluster has lost redundancy and the leader
@@ -236,15 +242,21 @@ jobs:
 
             # Extract the names of failed nodes (e.g., "rishi-2", "rishi-3")
             # The patronictl output has columns separated by "|". Column 2 is the member name.
+            # We catch TWO failure modes:
+            #   1. "start failed" — PostgreSQL couldn't start (stale locks, corrupt data)
+            #   2. "running" replicas NOT "streaming" — stuck on old timeline after failover
             FAILED_NODES=$(echo "$LIST" | grep "start failed" | awk -F'|' '{gsub(/ /,"",$2); print $2}')
+            STALE_NODES=$(echo "$LIST" | grep -v "Leader" | grep -v "streaming" | grep -v "start failed" | grep "running" | awk -F'|' '{gsub(/ /,"",$2); print $2}')
+            # Merge both lists
+            ALL_BAD_NODES=$(echo -e "${FAILED_NODES}\n${STALE_NODES}" | grep -v '^$' | sort -u)
 
-            if [ -z "$FAILED_NODES" ]; then
-              echo "No failed replicas found (may have recovered on their own)"
+            if [ -z "$ALL_BAD_NODES" ]; then
+              echo "No failed or stale replicas found (may have recovered on their own)"
               exit 0
             fi
 
-            # Reinit each failed replica
-            for NODE in $FAILED_NODES; do
+            # Reinit each failed or stale replica
+            for NODE in $ALL_BAD_NODES; do
               echo "==> Reinitializing failed replica: $NODE"
               # patronictl reinit <scope> <node> --force
               # --force skips the interactive confirmation prompt

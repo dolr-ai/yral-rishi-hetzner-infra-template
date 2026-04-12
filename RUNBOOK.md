@@ -141,6 +141,22 @@ reinitializes failed replicas. If the self-healing worked, you'll see
 the cluster recover without manual intervention. Check the workflow run
 in GitHub Actions for details.
 
+### Replicas stuck on old timeline (state "running", not "streaming")
+
+After a failover, a replica may show `running` instead of `streaming` and
+have a different timeline (TL) number than the leader. This means it's
+running PostgreSQL but NOT replicating from the new leader — it's stuck
+on the old leader's data.
+
+The `infra-health.yml` auto-reinit catches this automatically. To fix
+manually, reinit the stuck replica:
+
+```bash
+ssh deploy@138.201.137.181
+C=$(docker ps -qf "name=<STACK>_patroni-rishi" | head -1)
+docker exec "$C" patronictl -c /etc/patroni.yml reinit <SCOPE> rishi-3 --force
+```
+
 ### When reinit doesn't work
 
 If `patronictl reinit` fails repeatedly, the issue may be deeper:

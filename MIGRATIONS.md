@@ -135,6 +135,22 @@ migrations/002_add_email.down.sql  ← reverse (applied manually)
 
 Down files are not applied automatically — they're a manual safety net.
 
+## GOTCHA: never replace a migration file's contents after it's been applied
+
+Migrations are tracked by **filename**, not by content. Once `001_initial.sql`
+has been applied to the database (recorded in `schema_migrations`), changing
+its contents has **no effect** — the migration system sees "001_initial.sql
+was already applied" and silently skips it.
+
+**When does this bite you?** When you create a new service from the template:
+1. `new-service.sh` bootstraps the service → first CI deploy applies `001_initial.sql` (counter table)
+2. You replace `001_initial.sql` contents with your own schema (e.g., game tables)
+3. Next deploy: migration system skips it → your tables are never created → health check fails
+
+**The fix:** always add your schema as `002_your_schema.sql`. Never modify
+an already-applied migration. The template's `001_initial.sql` (counter table)
+is harmless — leave it and add your tables in `002`.
+
 ## Fresh cluster bootstrap
 
 When a new Patroni cluster bootstraps (first deploy or after a full reset),
