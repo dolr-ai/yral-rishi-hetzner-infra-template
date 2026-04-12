@@ -52,16 +52,14 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# Validate S3 creds
+# Validate S3 creds (accept either AWS_* or BACKUP_S3_* naming)
 if [ -z "${LOCAL_FILE}" ]; then
-    for VAR in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY; do
-        # Try reading from BACKUP_S3_* env vars (which is how GitHub Secrets name them)
-        [ -z "${!VAR:-}" ] && eval "export ${VAR}=\${BACKUP_S3_ACCESS_KEY:-}" 2>/dev/null
-    done
-    [ -z "${AWS_ACCESS_KEY_ID:-}" ] && export AWS_ACCESS_KEY_ID="${BACKUP_S3_ACCESS_KEY:-}"
-    [ -z "${AWS_SECRET_ACCESS_KEY:-}" ] && export AWS_SECRET_ACCESS_KEY="${BACKUP_S3_SECRET_KEY:-}"
-    if [ -z "${AWS_ACCESS_KEY_ID:-}" ] || [ -z "${AWS_SECRET_ACCESS_KEY:-}" ]; then
-        echo "FATAL: S3 credentials not set. Export BACKUP_S3_ACCESS_KEY + BACKUP_S3_SECRET_KEY"
+    export AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-${BACKUP_S3_ACCESS_KEY:-}}"
+    export AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-${BACKUP_S3_SECRET_KEY:-}}"
+    if [ -z "${AWS_ACCESS_KEY_ID}" ] || [ -z "${AWS_SECRET_ACCESS_KEY}" ]; then
+        echo "FATAL: S3 credentials not set."
+        echo "  Export BACKUP_S3_ACCESS_KEY + BACKUP_S3_SECRET_KEY"
+        echo "  or AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY"
         exit 1
     fi
 fi

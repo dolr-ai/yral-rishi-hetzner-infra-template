@@ -1,5 +1,9 @@
 FROM python:3.12-slim
 
+# OCI image labels for provenance tracking (which repo + commit built this)
+LABEL org.opencontainers.image.source="https://github.com/dolr-ai/yral-rishi-hetzner-infra-template"
+LABEL org.opencontainers.image.description="dolr-ai service app image"
+
 # Create non-root user to run the app. Defense in depth: a code-execution
 # bug in the app or any pip dep no longer hands the attacker root inside
 # the container, which is the most common foothold for container escapes.

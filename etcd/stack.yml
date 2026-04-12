@@ -50,6 +50,8 @@ services:
           - node.labels.server == rishi-1
       restart_policy:
         condition: any
+        max_attempts: 10
+        window: 120s
       # Rolling update — same reasoning as Patroni: etcd needs quorum 2/3
       update_config:
         parallelism: 1
@@ -79,6 +81,8 @@ services:
           - node.labels.server == rishi-2
       restart_policy:
         condition: any
+        max_attempts: 10
+        window: 120s
       update_config:
         parallelism: 1
         delay: 30s
@@ -107,6 +111,8 @@ services:
           - node.labels.server == rishi-3
       restart_policy:
         condition: any
+        max_attempts: 10
+        window: 120s
       update_config:
         parallelism: 1
         delay: 30s

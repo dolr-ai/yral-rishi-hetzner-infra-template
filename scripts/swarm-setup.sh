@@ -78,15 +78,29 @@ REMOTE
 echo "    Swarm initialized. Worker token captured."
 
 echo ""
-echo "==> Step 3: Joining workers to the Swarm..."
-ssh "${DEPLOY_USER}@${WORKER_2_IP}" \
-    "docker swarm join --token ${WORKER_TOKEN} ${MANAGER_IP}:2377 2>/dev/null \
-        && echo '    rishi-2 joined' \
-        || echo '    rishi-2: already in swarm'"
-ssh "${DEPLOY_USER}@${WORKER_3_IP}" \
-    "docker swarm join --token ${WORKER_TOKEN} ${MANAGER_IP}:2377 2>/dev/null \
-        && echo '    rishi-3 joined' \
-        || echo '    rishi-3: already in swarm'"
+echo "==> Step 3: Joining workers to the Swarm (with retry)..."
+join_worker() {
+    local WORKER_IP="$1"
+    local WORKER_NAME="$2"
+    for attempt in 1 2 3 4 5; do
+        if ssh "${DEPLOY_USER}@${WORKER_IP}" \
+            "docker swarm join --token ${WORKER_TOKEN} ${MANAGER_IP}:2377 2>/dev/null"; then
+            echo "    ${WORKER_NAME} joined (attempt ${attempt})"
+            return 0
+        fi
+        # Check if already in swarm (not an error)
+        if ssh "${DEPLOY_USER}@${WORKER_IP}" "docker info --format '{{.Swarm.LocalNodeState}}'" 2>/dev/null | grep -q active; then
+            echo "    ${WORKER_NAME}: already in swarm"
+            return 0
+        fi
+        echo "    ${WORKER_NAME}: join attempt ${attempt}/5 failed, retrying in 5s..."
+        sleep 5
+    done
+    echo "    FATAL: ${WORKER_NAME} (${WORKER_IP}) could not join the Swarm after 5 attempts"
+    exit 1
+}
+join_worker "${WORKER_2_IP}" "rishi-2"
+join_worker "${WORKER_3_IP}" "rishi-3"
 
 echo ""
 echo "==> Step 4: Adding node labels for placement constraints..."

@@ -31,6 +31,8 @@ services:
           - node.labels.server == rishi-1
       restart_policy:
         condition: any
+        max_attempts: 10
+        window: 120s
 
   haproxy-rishi-2:
     image: haproxy:2.8-alpine
@@ -45,6 +47,8 @@ services:
           - node.labels.server == rishi-2
       restart_policy:
         condition: any
+        max_attempts: 10
+        window: 120s
 
 configs:
   haproxy_cfg:

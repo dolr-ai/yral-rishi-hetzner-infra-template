@@ -56,7 +56,7 @@ services:
       # window. start_period gives the app 30s to import + open the DB pool
       # before failures count toward the unhealthy threshold.
       interval: 5s
-      timeout: 5s
+      timeout: 3s
       retries: 3
       start_period: 30s
 

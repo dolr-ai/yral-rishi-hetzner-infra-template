@@ -54,6 +54,8 @@ services:
           - node.labels.server == rishi-1
       restart_policy:
         condition: any
+        max_attempts: 10
+        window: 120s
       # Rolling update: ONE container at a time, with 30s gap.
       # WHY: Patroni cluster needs quorum (2 of 3) to elect a leader. If
       # Swarm recreates all 3 containers simultaneously (e.g. on a config
@@ -90,6 +92,8 @@ services:
           - node.labels.server == rishi-2
       restart_policy:
         condition: any
+        max_attempts: 10
+        window: 120s
       update_config:
         parallelism: 1
         delay: 30s
@@ -120,6 +124,8 @@ services:
           - node.labels.server == rishi-3
       restart_policy:
         condition: any
+        max_attempts: 10
+        window: 120s
       update_config:
         parallelism: 1
         delay: 30s

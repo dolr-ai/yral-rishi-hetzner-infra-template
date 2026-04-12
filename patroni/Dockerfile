@@ -9,6 +9,9 @@
 
 FROM ubuntu:22.04
 
+LABEL org.opencontainers.image.source="https://github.com/dolr-ai/yral-rishi-hetzner-infra-template"
+LABEL org.opencontainers.image.description="dolr-ai Patroni + PostgreSQL 16 HA image"
+
 ENV DEBIAN_FRONTEND=noninteractive
 # PostgreSQL 16 bins (initdb, pg_ctl, etc.) are here — Patroni needs them in PATH
 ENV PATH="/usr/lib/postgresql/16/bin:${PATH}"
