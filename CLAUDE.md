@@ -141,6 +141,9 @@ backward-compatible with the currently-running code (expand-contract pattern).
 See `SECURITY.md` for the full threat model + deferred TODOs.
 See `RUNBOOK.md` for step-by-step incident playbooks (leader failover, replica
 recovery, Caddy down, etcd degraded, backup failure, restore, failed deploy).
+See `DOCUMENTATION-STANDARDS.md` for the mandatory documentation rules that
+every service built from this template must follow (line-by-line comments,
+WHY blocks, header blocks, 5 required docs per service).
 
 ---
 
