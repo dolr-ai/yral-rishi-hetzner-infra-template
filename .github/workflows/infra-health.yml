@@ -1,123 +1,346 @@
+# ---------------------------------------------------------------------------
+# infra-health.yml — GitHub Actions workflow that checks the health of ALL
+# infrastructure components every 5 minutes.
+#
+# WHAT DOES THIS DO?
+# It runs 5 automated checks + 1 self-healing step:
+#   1. App health: hits the public /health URL and checks for HTTP 200
+#   2. Patroni cluster: SSHes into rishi-1 and asks Patroni if all 3
+#      database nodes are healthy (1 leader + 2 streaming replicas)
+#   3. etcd cluster: SSHes into rishi-1 and asks etcd if all 3 nodes
+#      are healthy (etcd coordinates database leader elections)
+#   4. Auto-reinit: if Patroni replicas are in "start failed", automatically
+#      reinitialize them from the leader (self-healing)
+#   5. Last backup: checks if the most recent backup.yml run succeeded
+#   6. Uptime Kuma push: reports overall status (including per-component
+#      outcomes) to Uptime Kuma for alerting
+#
+# WHEN DOES IT RUN?
+#   - Every 5 minutes automatically (cron schedule)
+#   - Manually via "Run workflow" button in GitHub Actions UI
+#
+# WHY IS THIS USEFUL?
+# If any component degrades (e.g., a Patroni replica goes down), this
+# workflow catches it within 5 minutes — even if the app is still serving
+# requests fine. Early detection prevents small problems from becoming
+# outages.
+#
+# WHAT CHANGED (2026-04-12):
+# Previously, "degraded" Patroni state (1 leader but <2 replicas) was
+# treated as a warning and did NOT fail the health check. This meant
+# Uptime Kuma reported "up" even with 2 failed replicas. Now:
+#   - Degraded state exits 1 → Uptime Kuma reports "down"
+#   - Auto-reinit attempts to fix failed replicas automatically
+#   - Per-component outcomes are included in the Uptime Kuma message
+# ---------------------------------------------------------------------------
+
+# The name shown in the GitHub Actions UI
 name: Infrastructure Health Check
 
+# WHEN to run this workflow
 on:
+  # "schedule" = run automatically on a timer (cron syntax)
   schedule:
-    # Every 5 minutes
+    # "*/5 * * * *" = every 5 minutes, every hour, every day
+    # Cron format: minute hour day-of-month month day-of-week
     - cron: '*/5 * * * *'
+  # "workflow_dispatch" = also allow manual runs from the GitHub Actions UI
   workflow_dispatch:
 
+# JOBS: the actual work to perform. This workflow has one job with multiple steps.
 jobs:
   health:
+    # The name shown in the GitHub Actions UI for this job
     name: Check app + DB + backup health
+    # Run on a fresh Ubuntu virtual machine hosted by GitHub
     runs-on: ubuntu-latest
     steps:
+      # ----- Step 1: Check out the repo so we can read project.config + servers.config -----
       - uses: actions/checkout@v4
 
+      # ----- Step 2: Load configuration variables into the job's environment -----
       - name: Load config
         run: |
+          # Read project.config: strip comment lines (starting with #) and blank lines,
+          # then write each KEY=value line into GitHub's special $GITHUB_ENV file.
+          # After this, all steps can use ${{ env.PROJECT_DOMAIN }}, ${{ env.SWARM_STACK }}, etc.
           grep -v '^#' project.config | grep -v '^$' >> $GITHUB_ENV
+          # Same for servers.config (SERVER_1_IP, DEPLOY_USER, etc.)
           grep -v '^#' servers.config | grep -v '^$' >> $GITHUB_ENV
 
+      # ----- Step 3: Skip database checks if this is a stateless service -----
       - name: Skip if stateless
+        # Only run this step if WITH_DATABASE is 'false' in project.config
         if: env.WITH_DATABASE == 'false'
         run: echo "Stateless service — skipping DB checks"
 
+      # ----- Step 4: Check the app's public health endpoint -----
       - name: Check app health (public URL)
+        # "id: app" gives this step a name so later steps can reference its outputs
         id: app
         run: |
+          # curl: make an HTTP request to the app's /health URL
+          #   -s: silent (don't show progress bar)
+          #   -o /dev/null: throw away the response body (we only care about the status code)
+          #   -w '%{http_code}': print ONLY the HTTP status code (200, 503, etc.)
+          #   --max-time 10: give up after 10 seconds
+          #   2>/dev/null: suppress error messages
+          #   || echo "000": if curl fails entirely (no network), output "000"
           HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "https://${PROJECT_DOMAIN}/health" 2>/dev/null || echo "000")
+          # Save the HTTP code as a step output so step 8 (Uptime Kuma) can read it
           echo "http_code=${HTTP_CODE}" >> $GITHUB_OUTPUT
+          # Print a human-readable result
           if [ "$HTTP_CODE" = "200" ]; then
             echo "✓ App healthy (HTTP 200)"
           else
             echo "✗ App UNHEALTHY (HTTP ${HTTP_CODE})"
           fi
 
+      # ----- Step 5: Check the Patroni database cluster -----
+      # "continue-on-error: true" means: if this step fails (exit 1), keep
+      # running subsequent steps. Without this, a Patroni failure would skip
+      # the etcd check, backup check, auto-reinit, and Uptime Kuma push.
+      # We check the outcome in the Uptime Kuma step using steps.patroni.outcome.
       - name: Check Patroni cluster (3/3 streaming)
+        # Only run if this service has a database
         if: env.WITH_DATABASE != 'false'
         id: patroni
+        continue-on-error: true
+        # SSH into rishi-1 (the Swarm manager) and inspect the Patroni cluster
         uses: appleboy/ssh-action@v1.2.0
         with:
+          # Connect to Server 1's IP address
           host: ${{ env.SERVER_1_IP }}
+          # Log in as the deploy user (not root)
           username: ${{ env.DEPLOY_USER }}
+          # Use the CI SSH private key stored in GitHub Secrets
           key: ${{ secrets.HETZNER_BARE_METAL_GITHUB_ACTIONS_SSH_PRIVATE_KEY }}
           script: |
+            # Find the first running Patroni container on this server.
+            # "docker ps -qf" lists container IDs filtered by name.
+            # "head -1" takes the first one (there should only be one).
             C=$(docker ps -qf "name=${SWARM_STACK}_patroni-rishi" | head -1)
+            # If no Patroni container is running, something is very wrong
             if [ -z "$C" ]; then
-              echo "PATRONI_STATUS=no_container" >> /tmp/health_output
               echo "✗ No Patroni container found"
               exit 1
             fi
+            # "docker exec" runs a command INSIDE the Patroni container.
+            # "patronictl list" shows the status of all nodes in the cluster:
+            # which is the leader, which are replicas, and their replication state.
             LIST=$(docker exec "$C" patronictl -c /etc/patroni.yml list 2>/dev/null)
+            # Print the full cluster status table (for debugging in CI logs)
             echo "$LIST"
+            # Count how many nodes are "streaming" (actively copying data from the leader)
+            # "grep -c" counts matching lines. "|| true" prevents error if count is 0.
             STREAMING=$(echo "$LIST" | grep -c "streaming" || true)
+            # Count how many nodes are the "Leader"
             LEADER=$(echo "$LIST" | grep -c "Leader" || true)
+            # Count how many nodes have "start failed" (crashed and couldn't restart)
             FAILED=$(echo "$LIST" | grep -c "start failed" || true)
             echo ""
+            # Evaluate the cluster health:
             if [ "$LEADER" -ge 1 ] && [ "$STREAMING" -ge 2 ] && [ "$FAILED" -eq 0 ]; then
+              # IDEAL: 1 leader + 2 streaming replicas + 0 failures
               echo "✓ Patroni healthy: ${LEADER} leader, ${STREAMING} streaming, ${FAILED} failed"
             elif [ "$LEADER" -ge 1 ] && [ "$STREAMING" -ge 1 ]; then
-              echo "⚠ Patroni degraded: ${LEADER} leader, ${STREAMING} streaming, ${FAILED} failed"
+              # DEGRADED: leader exists but only 1 replica is streaming (1 node is down).
+              # This IS a failure — the cluster has lost redundancy and the leader
+              # can flap under load, causing request timeouts.
+              echo "✗ Patroni DEGRADED: ${LEADER} leader, ${STREAMING} streaming, ${FAILED} failed"
+              exit 1
             else
+              # CRITICAL: no leader OR no streaming replicas — database may be unavailable
               echo "✗ Patroni CRITICAL: ${LEADER} leader, ${STREAMING} streaming, ${FAILED} failed"
               exit 1
             fi
 
+      # ----- Step 6: Check the etcd coordination cluster -----
+      # Also continue-on-error so the remaining checks still run if etcd is down
       - name: Check etcd cluster (3/3 healthy)
+        # Only run if this service has a database
         if: env.WITH_DATABASE != 'false'
         id: etcd
+        continue-on-error: true
+        # SSH into rishi-1 to inspect etcd
         uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ env.SERVER_1_IP }}
           username: ${{ env.DEPLOY_USER }}
           key: ${{ secrets.HETZNER_BARE_METAL_GITHUB_ACTIONS_SSH_PRIVATE_KEY }}
           script: |
+            # Find the etcd container running on rishi-1
             E=$(docker ps -qf "name=${SWARM_STACK}_etcd-rishi-1" | head -1)
+            # "etcdctl endpoint health" checks all 3 etcd nodes and reports
+            # whether each one is "healthy" or not. We pass all 3 endpoints
+            # so it checks every node, not just the local one.
             HEALTH=$(docker exec "$E" etcdctl --endpoints=http://etcd-rishi-1:2379,http://etcd-rishi-2:2379,http://etcd-rishi-3:2379 endpoint health 2>&1)
+            # Print the full health output (for debugging in CI logs)
             echo "$HEALTH"
+            # Count how many nodes reported "is healthy"
             HEALTHY=$(echo "$HEALTH" | grep -c "is healthy" || true)
             if [ "$HEALTHY" -eq 3 ]; then
+              # All 3 etcd nodes are healthy — this is the expected state
               echo "✓ etcd 3/3 healthy"
             else
+              # One or more etcd nodes are down — Patroni may lose the ability
+              # to coordinate leader elections if this gets worse
               echo "✗ etcd ${HEALTHY}/3 healthy"
               exit 1
             fi
 
+      # ----- Step 7: Auto-reinit failed Patroni replicas (SELF-HEALING) -----
+      # If the Patroni check detected failures, automatically try to fix them
+      # by reinitializing the failed replicas from the leader. This is the same
+      # as running `scripts/fix-failed-replicas.sh` manually — but automated.
+      #
+      # WHY AUTO-HEAL?
+      # The most common reason replicas enter "start failed" is stale lock files
+      # or WAL divergence after an unclean shutdown. `patronictl reinit` is the
+      # standard fix and is safe: replicas are read-only copies of the leader,
+      # so wiping and re-copying never loses data.
+      #
+      # This means: if a replica crashes at 3 AM, it's fixed by 3:05 AM —
+      # no human needs to wake up.
+      - name: Auto-reinit failed Patroni replicas
+        # Only run if Patroni check failed (degraded or critical)
+        if: env.WITH_DATABASE != 'false' && steps.patroni.outcome == 'failure'
+        id: reinit
+        continue-on-error: true
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ env.SERVER_1_IP }}
+          username: ${{ env.DEPLOY_USER }}
+          key: ${{ secrets.HETZNER_BARE_METAL_GITHUB_ACTIONS_SSH_PRIVATE_KEY }}
+          script: |
+            # Find a running Patroni container to use as our management tool
+            C=$(docker ps -qf "name=${SWARM_STACK}_patroni-rishi" | head -1)
+            [ -z "$C" ] && { echo "No Patroni container found — cannot reinit"; exit 1; }
+
+            # Get the cluster status
+            LIST=$(docker exec "$C" patronictl -c /etc/patroni.yml list 2>/dev/null)
+            echo "$LIST"
+            echo ""
+
+            # Verify a leader exists (we need it to copy data from)
+            LEADER=$(echo "$LIST" | grep -c "Leader" || true)
+            if [ "$LEADER" -lt 1 ]; then
+              echo "No leader found — cannot reinit replicas without a leader"
+              exit 1
+            fi
+
+            # Get the Patroni scope (cluster name) from the environment variable
+            # inside the container
+            SCOPE=$(docker exec "$C" printenv PATRONI_SCOPE 2>/dev/null)
+            echo "Patroni scope: ${SCOPE}"
+
+            # Extract the names of failed nodes (e.g., "rishi-2", "rishi-3")
+            # The patronictl output has columns separated by "|". Column 2 is the member name.
+            FAILED_NODES=$(echo "$LIST" | grep "start failed" | awk -F'|' '{gsub(/ /,"",$2); print $2}')
+
+            if [ -z "$FAILED_NODES" ]; then
+              echo "No failed replicas found (may have recovered on their own)"
+              exit 0
+            fi
+
+            # Reinit each failed replica
+            for NODE in $FAILED_NODES; do
+              echo "==> Reinitializing failed replica: $NODE"
+              # patronictl reinit <scope> <node> --force
+              # --force skips the interactive confirmation prompt
+              docker exec "$C" patronictl -c /etc/patroni.yml reinit "$SCOPE" "$NODE" --force 2>&1 || \
+                echo "  reinit command returned non-zero for $NODE (may still be working)"
+            done
+
+            # Wait 30 seconds for the reinit to start making progress
+            echo ""
+            echo "Waiting 30s for replicas to begin re-bootstrapping..."
+            sleep 30
+
+            # Print the updated cluster status
+            echo ""
+            echo "Cluster status after reinit:"
+            docker exec "$C" patronictl -c /etc/patroni.yml list 2>/dev/null
+
+      # ----- Step 8: Check the last database backup -----
       - name: Check last backup age
+        # Only run if this service has a database
         if: env.WITH_DATABASE != 'false'
         id: backup
         run: |
-          # Check the last backup workflow run
+          # Use the GitHub CLI to check the most recent backup.yml workflow run.
+          # --workflow=backup.yml: only look at backup runs (not deploy runs)
+          # --limit 1: just the latest one
+          # --json: output as JSON so we can parse it
+          # -q '.[0]': extract the first (only) result
           LAST_RUN=$(gh run list --workflow=backup.yml --limit 1 --json conclusion,createdAt -q '.[0]' 2>/dev/null || echo '{}')
+          # Extract the "conclusion" field (e.g., "success", "failure", "cancelled")
+          # using Python's json module (Python is pre-installed on GitHub runners)
           CONCLUSION=$(echo "$LAST_RUN" | python3 -c "import sys,json; print(json.load(sys.stdin).get('conclusion','unknown'))" 2>/dev/null)
+          # Extract the timestamp of when the backup ran
           CREATED=$(echo "$LAST_RUN" | python3 -c "import sys,json; print(json.load(sys.stdin).get('createdAt',''))" 2>/dev/null)
+          # Print both for the CI log
           echo "Last backup: ${CREATED} (${CONCLUSION})"
           if [ "$CONCLUSION" = "success" ]; then
             echo "✓ Last backup succeeded"
           else
+            # Warning (not failure) because a missed backup isn't an immediate outage
             echo "⚠ Last backup status: ${CONCLUSION}"
           fi
         env:
+          # The GitHub CLI needs a token to access the repo's workflow runs
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # ----- Step 9: Report overall status to Uptime Kuma (optional) -----
+      # This step builds a detailed status message that includes the outcome
+      # of EACH individual check, so Uptime Kuma's dashboard shows exactly
+      # what's wrong (not just "down").
       - name: Push to Uptime Kuma (if configured)
+        # "if: always()" means this step runs even if previous steps failed.
+        # We want to report DOWN status to Uptime Kuma when things break.
         if: always()
         run: |
+          # Read the Uptime Kuma push URL from env (may be empty if not configured)
           PUSH_URL="${UPTIME_KUMA_PUSH_URL:-}"
+          # If no URL is set, skip this step (Uptime Kuma is optional)
           if [ -z "$PUSH_URL" ]; then
             echo "UPTIME_KUMA_PUSH_URL not set — skipping push"
             exit 0
           fi
-          # Determine overall status
+
+          # Gather per-component outcomes.
+          # "steps.<id>.outcome" is "success" or "failure" (set even with continue-on-error).
           APP_CODE="${{ steps.app.outputs.http_code }}"
-          if [ "$APP_CODE" = "200" ] && [ "${{ job.status }}" = "success" ]; then
+          PATRONI="${{ steps.patroni.outcome }}"
+          ETCD="${{ steps.etcd.outcome }}"
+          REINIT="${{ steps.reinit.outcome }}"
+
+          # Determine overall status.
+          # ALL components must be healthy for the overall status to be "up".
+          if [ "$APP_CODE" = "200" ] && [ "$PATRONI" != "failure" ] && [ "$ETCD" != "failure" ]; then
             STATUS="up"
             MSG="All checks passed"
           else
             STATUS="down"
-            MSG="App=${APP_CODE} Job=${{ job.status }}"
+            # Build a detailed message showing which component(s) failed.
+            # This appears in Uptime Kuma's dashboard so you can see at a glance
+            # whether the problem is the app, Patroni, etcd, or multiple things.
+            MSG="App=${APP_CODE} Patroni=${PATRONI} etcd=${ETCD}"
+            # If auto-reinit ran, include its outcome
+            if [ -n "$REINIT" ] && [ "$REINIT" != "" ]; then
+              MSG="${MSG} Reinit=${REINIT}"
+            fi
           fi
+
+          # Send the status to Uptime Kuma via a simple HTTP GET request.
+          # Uptime Kuma uses "push monitors" — you hit a URL and it records
+          # whether the push came in on time.
+          #   -fsS: fail silently on HTTP errors, but show errors on network failures
+          #   --max-time 10: give up after 10 seconds
+          #   >/dev/null 2>&1: suppress all output
+          #   || true: don't fail the workflow if Uptime Kuma itself is down
           curl -fsS "${PUSH_URL}?status=${STATUS}&msg=${MSG}" --max-time 10 >/dev/null 2>&1 || true
-          echo "Pushed status=${STATUS} to Uptime Kuma"
+          echo "Pushed status=${STATUS} msg='${MSG}' to Uptime Kuma"
         env:
+          # Read from GitHub Secrets (empty string if not set)
           UPTIME_KUMA_PUSH_URL: ${{ secrets.UPTIME_KUMA_PUSH_URL }}

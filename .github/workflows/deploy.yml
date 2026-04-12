@@ -1,134 +1,266 @@
+# ---------------------------------------------------------------------------
+# deploy.yml — the main CI/CD pipeline. Runs every time code is pushed to main.
+#
+# WHAT IS CI/CD?
+# CI = Continuous Integration: automatically test every code change.
+# CD = Continuous Deployment: automatically deploy passing code to production.
+# Together, they mean: push to main → tests run → if tests pass → deploy to servers.
+#
+# WHAT DOES THIS PIPELINE DO? (4 jobs, in order)
+#   Job 0 (config): Read project settings (does this service have a database?)
+#   Job 1 (build-and-push): Build Docker images, scan for vulnerabilities, push to GHCR
+#   Job 2 (deploy-db-stack): Deploy database infrastructure (etcd + Patroni + HAProxy)
+#   Job 3 (deploy-app): Deploy the app to rishi-1 (canary), then rishi-2
+#
+# WHAT IS GHCR?
+# GitHub Container Registry — a place to store Docker images, built into GitHub.
+# Each image gets a URL like ghcr.io/dolr-ai/yral-my-service:abc123
+#
+# WHAT IS A CANARY DEPLOY?
+# Deploy to ONE server first (rishi-1). If it's healthy, deploy to the next
+# server (rishi-2). If rishi-1 fails, STOP — rishi-2 keeps the old working code.
+# This way, a bad deploy only affects half the traffic (the half going to rishi-1),
+# and it gets auto-rolled back within seconds.
+#
+# WHY "needs: [config, test, gitleaks]"?
+# Jobs listed in "needs" must finish BEFORE this job starts. This ensures
+# we never deploy code that hasn't passed tests or has leaked secrets.
+# ---------------------------------------------------------------------------
+
+# The name shown in the GitHub Actions UI
 name: Build and Deploy
 
+# WHEN to run this workflow
 on:
+  # Run when code is pushed to the "main" branch
   push:
     branches:
       - main
 
+# JOBS: the individual tasks that make up the pipeline.
+# Jobs run in parallel by default, unless they have "needs:" dependencies.
 jobs:
   # ============================================================================
-  # JOB 0: Read WITH_DATABASE from project.config so later jobs can gate on it.
-  # Job-level `if:` can't read $GITHUB_ENV from a step, so we expose the flag
-  # as a job output instead.
+  # JOB 0: Read the WITH_DATABASE flag from project.config.
+  #
+  # WHY A SEPARATE JOB?
+  # Later jobs need to know if this service has a database (to skip DB deploy
+  # for stateless services). GitHub Actions' "if:" conditions on jobs can't
+  # read environment variables set by steps — they can only read "job outputs".
+  # So we read the flag here and expose it as an output that other jobs can check.
   # ============================================================================
   config:
+    # The name shown in the GitHub Actions UI
     name: Read project.config flags
+    # Run on a fresh Ubuntu virtual machine
     runs-on: ubuntu-latest
+    # Declare outputs that other jobs can reference
     outputs:
+      # This will be "true" or "false"
       with_database: ${{ steps.flags.outputs.with_database }}
     steps:
+      # Check out the repo so we can read project.config
       - uses: actions/checkout@v4
+      # Read the WITH_DATABASE value from project.config
       - id: flags
         run: |
+          # grep: find the line starting with "WITH_DATABASE="
+          # cut -d= -f2: split on "=" and take the value after it
           WITH_DB=$(grep '^WITH_DATABASE=' project.config | cut -d= -f2)
+          # Write to $GITHUB_OUTPUT so other jobs can read it.
+          # Default to "true" if WITH_DATABASE isn't in the file.
           echo "with_database=${WITH_DB:-true}" >> $GITHUB_OUTPUT
 
   # ============================================================================
-  # JOB 1: Load project.config + build images and push to GHCR.
-  # Tagged with both :latest (alias) and :${git-sha} (immutable).
+  # GITLEAKS: Scan the entire repo history for accidentally committed secrets
+  # (API keys, passwords, tokens, etc.)
+  #
+  # WHY?
+  # If someone accidentally commits a password, gitleaks catches it BEFORE
+  # the code deploys. This runs in parallel with tests (no "needs:" dependency).
   # ============================================================================
   gitleaks:
+    # The name shown in the GitHub Actions UI
     name: Scan repo for leaked secrets
     runs-on: ubuntu-latest
     steps:
+      # Check out the FULL repo history (fetch-depth: 0 means all commits).
+      # Gitleaks scans every commit, not just the latest one, so it catches
+      # secrets that were committed and then "deleted" (still in git history).
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      # Use the gitleaks binary directly. The official gitleaks-action now
-      # requires a paid license for org repos; the CLI itself is still free.
+      # Install and run gitleaks.
+      # NOTE: The official gitleaks GitHub Action now requires a paid license
+      # for organization repos. The CLI binary itself is still free, so we
+      # download and run it directly.
       - name: Install and run gitleaks
         run: |
+          # Set the version to download
           GITLEAKS_VERSION=8.21.2
+          # Download the gitleaks binary from GitHub releases.
+          # curl -sSL: silent, show errors, follow redirects.
+          # tar -xz: extract the .tar.gz archive.
+          # -C /tmp: extract to the /tmp directory.
+          # "gitleaks": only extract the gitleaks binary (not other files in the archive).
           curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
             | tar -xz -C /tmp gitleaks
+          # Run gitleaks to scan the repo.
+          #   detect: scan mode (find secrets)
+          #   --source .: scan the current directory (the checked-out repo)
+          #   --config .gitleaks.toml: use our custom config (which excludes known false positives)
+          #   --redact: hide the actual secret values in the output (for safety)
+          #   --verbose: show detailed output so we can see what was scanned
           /tmp/gitleaks detect --source . --config .gitleaks.toml --redact --verbose
 
+  # ============================================================================
+  # TEST: Run unit tests and template integrity checks.
+  # Must pass before any images are built or code is deployed.
+  # ============================================================================
   test:
     name: Run unit tests + template integrity checks
     runs-on: ubuntu-latest
+    # Wait for config job (we don't actually need its output, but it's fast
+    # and this ensures project.config is valid before we run tests)
     needs: config
     steps:
+      # Check out the repo
       - uses: actions/checkout@v4
+      # Install Python 3.12 (matches the version in our Dockerfile)
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      # Install development dependencies (pytest, linters, etc.)
       - name: Install dev deps
         run: pip install -r requirements-dev.txt
+      # Run pytest on the tests/ directory.
+      # -v = verbose (show each test name and pass/fail)
       - name: pytest
         run: pytest tests/ -v
+      # Run the template integrity check script.
+      # This verifies that project.config variables are consistent with
+      # the rest of the repo (e.g., PROJECT_NAME matches in all files).
       - name: Template integrity
         run: bash tests/test_template_integrity.sh
 
+  # ============================================================================
+  # JOB 1: Build Docker images, scan them for security vulnerabilities, and
+  # push them to GHCR (GitHub Container Registry).
+  #
+  # This builds up to 3 images:
+  #   1. App image (always) — the FastAPI application
+  #   2. Backup image (if database) — alpine + pg_dump + mc for daily backups
+  #   3. Patroni image (if database) — PostgreSQL managed by Patroni
+  #
+  # Each image is tagged with both:
+  #   :latest — a moving pointer to the newest version
+  #   :<git-sha> — an immutable tag (e.g., :abc123) for exact version tracking
+  # ============================================================================
   build-and-push:
     name: Build and push Docker images
     runs-on: ubuntu-latest
+    # Wait for config (need WITH_DATABASE), test (must pass), gitleaks (must pass)
     needs: [config, test, gitleaks]
+    # Permissions needed to push images to GHCR
     permissions:
+      # "contents: read" = can read the repo code
       contents: read
+      # "packages: write" = can push Docker images to GHCR
       packages: write
 
     steps:
+      # Check out the repo (needed to build Docker images from the Dockerfile)
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # Load project.config variables into the job's environment.
+      # After this step, we can use ${{ env.IMAGE_REPO }}, etc.
       - name: Load project.config into job env
-        # Parses every KEY=value line into $GITHUB_ENV so subsequent steps
-        # can use ${{ env.PROJECT_NAME }}, ${{ env.IMAGE_REPO }}, etc.
         run: |
+          # Strip comment lines and blank lines, write KEY=value pairs to $GITHUB_ENV
           grep -v '^#' project.config | grep -v '^$' >> $GITHUB_ENV
 
+      # Log in to GHCR so we can push images.
+      # Uses the built-in GITHUB_TOKEN (automatically provided by GitHub Actions).
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
+          # The registry URL
           registry: ghcr.io
+          # github.actor = the user who triggered the workflow (e.g., "rishichadha")
           username: ${{ github.actor }}
+          # GITHUB_TOKEN is automatically created by GitHub for each workflow run
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Build the app's Docker image and push it to GHCR.
       - name: Build and push app image
         uses: docker/build-push-action@v6
         with:
+          # Build context = repo root (where the Dockerfile is)
           context: .
+          # push: true = push to GHCR after building (not just build locally)
           push: true
+          # Tag with both :latest and :<git-sha> for immutable versioning
           tags: |
             ${{ env.IMAGE_REPO }}:latest
             ${{ env.IMAGE_REPO }}:${{ github.sha }}
 
+      # Scan the app image for CRITICAL security vulnerabilities using Trivy.
+      # CRITICAL CVEs (the most dangerous kind) BLOCK the deploy — exit-code: "1"
+      # means "fail the job if any are found."
       - name: Trivy vulnerability scan (CRITICAL — fails the build)
         uses: aquasecurity/trivy-action@master
         with:
+          # Scan the image we just built (using the git-sha tag)
           image-ref: ${{ env.IMAGE_REPO }}:${{ github.sha }}
+          # Output as a human-readable table
           format: table
+          # Only check for CRITICAL severity vulnerabilities
           severity: CRITICAL
-          exit-code: "1"          # CRITICAL CVEs block the deploy
+          # Exit code 1 = fail the job if any CRITICAL CVEs are found
+          exit-code: "1"
+          # Skip vulnerabilities that don't have a fix yet (unfixed = nothing we can do)
           ignore-unfixed: true
 
+      # Also scan for HIGH severity vulnerabilities, but only REPORT them
+      # (don't block the deploy). HIGH CVEs are too common to block every build.
       - name: Trivy vulnerability scan (HIGH — report only)
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: ${{ env.IMAGE_REPO }}:${{ github.sha }}
           format: table
           severity: HIGH
-          exit-code: "0"          # HIGH is too noisy to break builds; surface only
+          # Exit code 0 = don't fail the job even if HIGH CVEs are found
+          exit-code: "0"
           ignore-unfixed: true
 
+      # Build the backup image (only if this service has a database).
+      # This image contains pg_dump (PostgreSQL export tool) and mc (MinIO Client
+      # for uploading to S3-compatible storage).
       - name: Build and push backup image
+        # Skip this step for stateless services (no database = no backups needed)
         if: needs.config.outputs.with_database == 'true'
         uses: docker/build-push-action@v6
         with:
+          # Build context = the backup/ subdirectory (where backup/Dockerfile is)
           context: ./backup
           push: true
+          # Same dual-tag pattern: :latest + :<git-sha>
           tags: |
             ${{ env.IMAGE_REPO }}-backup:latest
             ${{ env.IMAGE_REPO }}-backup:${{ github.sha }}
 
+      # Build the Patroni image (only if this service has a database).
+      # This image contains PostgreSQL + Patroni + our bootstrap scripts.
       - name: Build and push Patroni image
         if: needs.config.outputs.with_database == 'true'
         uses: docker/build-push-action@v6
         with:
-          # Context is repo root (not ./patroni) so the Dockerfile can COPY
-          # both patroni/* files AND the migrations/ directory. The Dockerfile
-          # itself is still at patroni/Dockerfile.
+          # Context is the repo ROOT (not ./patroni) because the Dockerfile
+          # needs to COPY both patroni/* files AND the migrations/ directory.
+          # The Dockerfile itself lives at patroni/Dockerfile.
           context: .
+          # Tell Docker to use patroni/Dockerfile instead of the root Dockerfile
           file: patroni/Dockerfile
           push: true
           tags: |
@@ -136,35 +268,59 @@ jobs:
             ${{ env.PATRONI_IMAGE_REPO }}:${{ github.sha }}
 
   # ============================================================================
-  # JOB 2: Deploy etcd + Patroni + HAProxy as the project's Swarm stack.
-  # Pre-pulls the Patroni image on each server (private GHCR auth issue).
+  # JOB 2: Deploy the database infrastructure as a Docker Swarm stack.
+  #
+  # This deploys 3 services across the cluster:
+  #   - etcd (3 nodes) — leader election consensus
+  #   - Patroni (3 nodes) — manages PostgreSQL, auto-promotes on failure
+  #   - HAProxy (2 nodes) — routes app connections to the current DB leader
+  #
+  # WHY PRE-PULL THE IMAGE?
+  # Docker Swarm runs on all 3 servers but the GHCR registry requires
+  # authentication. Swarm's built-in image pull doesn't support private
+  # registries well. So we SSH into each server, log in to GHCR, and
+  # pull the image BEFORE telling Swarm to deploy. This ensures Swarm
+  # finds the image already on the server and doesn't fail with "image not found".
   # ============================================================================
   deploy-db-stack:
     name: Deploy etcd + Patroni + HAProxy (Swarm stack)
     runs-on: ubuntu-latest
+    # Wait for config (need WITH_DATABASE) and build-and-push (need the images)
     needs: [config, build-and-push]
+    # Only run if this service has a database
     if: needs.config.outputs.with_database == 'true'
 
     steps:
+      # Check out the repo (need stack files and deploy scripts)
       - uses: actions/checkout@v4
 
+      # Load both config files into the job's environment
       - name: Load project.config + servers.config into job env
         run: |
-          # Both files use simple KEY=value lines. Strip comments and blanks,
-          # append to $GITHUB_ENV. Order: project.config first, servers.config
-          # second (so servers.config can't be accidentally overridden).
+          # Load project.config first (PROJECT_NAME, IMAGE_REPO, etc.)
           grep -v '^#' project.config | grep -v '^$' >> $GITHUB_ENV
+          # Load servers.config second (SERVER_1_IP, DEPLOY_USER, etc.)
+          # Order matters: servers.config loaded second can't accidentally
+          # override project.config values.
           grep -v '^#' servers.config | grep -v '^$' >> $GITHUB_ENV
 
+      # Copy the stack files and deploy script to rishi-1 (the Swarm manager).
+      # SCP = Secure Copy Protocol (like cp but over SSH to a remote server).
       - name: Copy stack files + project.config + CI script to Swarm manager (rishi-1)
         uses: appleboy/scp-action@v0.1.7
         with:
+          # Destination server
           host: ${{ env.SERVER_1_IP }}
+          # Log in as the deploy user
           username: ${{ env.DEPLOY_USER }}
+          # SSH private key from GitHub Secrets
           key: ${{ secrets.HETZNER_BARE_METAL_GITHUB_ACTIONS_SSH_PRIVATE_KEY }}
+          # Files to copy (all the stack YAML files + deploy script + config)
           source: "etcd/stack.yml,patroni/stack.yml,haproxy/stack.yml,haproxy/haproxy.cfg,scripts/ci/deploy-db-stack.sh,project.config"
+          # Destination directory on the server
           target: /home/deploy/${{ env.SWARM_STACK }}-stack
 
+      # Pre-pull the Patroni image on Server 1 (log in to GHCR first)
       - name: Pre-pull Patroni image on Server 1
         uses: appleboy/ssh-action@v1.2.0
         with:
@@ -172,9 +328,12 @@ jobs:
           username: ${{ env.DEPLOY_USER }}
           key: ${{ secrets.HETZNER_BARE_METAL_GITHUB_ACTIONS_SSH_PRIVATE_KEY }}
           script: |
+            # Log in to GHCR using the GitHub token (piped via stdin for security)
             echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+            # Pull the specific image tagged with this commit's SHA
             docker pull ${{ env.PATRONI_IMAGE_REPO }}:${{ github.sha }}
 
+      # Pre-pull the Patroni image on Server 2 (same process)
       - name: Pre-pull Patroni image on Server 2
         uses: appleboy/ssh-action@v1.2.0
         with:
@@ -185,6 +344,7 @@ jobs:
             echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
             docker pull ${{ env.PATRONI_IMAGE_REPO }}:${{ github.sha }}
 
+      # Pre-pull the Patroni image on Server 3 (same process)
       - name: Pre-pull Patroni image on Server 3
         uses: appleboy/ssh-action@v1.2.0
         with:
@@ -195,86 +355,133 @@ jobs:
             echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
             docker pull ${{ env.PATRONI_IMAGE_REPO }}:${{ github.sha }}
 
+      # Run the actual Swarm stack deploy on rishi-1 (the Swarm manager).
+      # The deploy-db-stack.sh script handles: creating secrets, merging
+      # all 3 stack files, and running `docker stack deploy`.
       - name: Deploy stack via Swarm manager
         uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ env.SERVER_1_IP }}
           username: ${{ env.DEPLOY_USER }}
           key: ${{ secrets.HETZNER_BARE_METAL_GITHUB_ACTIONS_SSH_PRIVATE_KEY }}
+          # "envs" lists environment variables to pass to the remote script
           envs: IMAGE_TAG,POSTGRES_PASSWORD,REPLICATION_PASSWORD,GITHUB_TOKEN,GITHUB_ACTOR,STACK_DIR
           script: |
+            # Make the deploy script executable
             chmod +x ${STACK_DIR}/scripts/ci/deploy-db-stack.sh
+            # Run it — this script sources project.config, creates/updates
+            # Swarm secrets, and runs `docker stack deploy`
             ${STACK_DIR}/scripts/ci/deploy-db-stack.sh
         env:
+          # The git SHA (used as the image tag for immutable versioning)
           IMAGE_TAG: ${{ github.sha }}
+          # Database passwords from GitHub Secrets (never in code)
           POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
           REPLICATION_PASSWORD: ${{ secrets.REPLICATION_PASSWORD }}
+          # GHCR credentials for docker login on the server
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_ACTOR: ${{ github.actor }}
+          # Path where the stack files were copied to on the server
           STACK_DIR: /home/deploy/${{ env.SWARM_STACK }}-stack
 
   # ============================================================================
-  # JOB 3: Deploy app + Caddy snippet to rishi-1 and rishi-2.
+  # JOB 3: Deploy the app container + Caddy reverse proxy snippet to
+  # rishi-1 and rishi-2. Uses CANARY DEPLOY with auto-rollback.
+  #
+  # CANARY DEPLOY FLOW:
+  #   1. Deploy to rishi-1 first
+  #   2. Wait for health check to pass (up to 90 seconds)
+  #   3. If HEALTHY → deploy to rishi-2
+  #   4. If UNHEALTHY → auto-rollback rishi-1 to the previous version,
+  #      STOP (don't touch rishi-2). rishi-2 is still serving the old
+  #      working code via Cloudflare DNS round-robin → users see no outage.
   # ============================================================================
   deploy-app:
     name: Deploy app + Caddy snippet to rishi-1 and rishi-2
     runs-on: ubuntu-latest
+    # Wait for build-and-push (need the images) AND deploy-db-stack (DB must be up)
     needs: [config, build-and-push, deploy-db-stack]
-    # Run even if deploy-db-stack was skipped (stateless service).
+    # Run even if deploy-db-stack was SKIPPED (stateless services have no DB job).
+    # "always()" evaluates all conditions even if upstream jobs were skipped.
+    # We require build-and-push to succeed, but accept db-stack being either
+    # successful or skipped.
     if: |
       always() &&
       needs.build-and-push.result == 'success' &&
       (needs.deploy-db-stack.result == 'success' || needs.deploy-db-stack.result == 'skipped')
 
     steps:
+      # Check out the repo (need compose file, Caddy template, deploy scripts)
       - uses: actions/checkout@v4
 
+      # Load both config files into the job's environment
       - name: Load project.config + servers.config into job env
         run: |
-          # Both files use simple KEY=value lines. Strip comments and blanks,
-          # append to $GITHUB_ENV. Order: project.config first, servers.config
-          # second (so servers.config can't be accidentally overridden).
+          # Load project.config first, then servers.config
           grep -v '^#' project.config | grep -v '^$' >> $GITHUB_ENV
           grep -v '^#' servers.config | grep -v '^$' >> $GITHUB_ENV
 
       # ============================================================
-      # CANARY DEPLOY: rishi-1 first, with sustained verify + auto-
-      # rollback INSIDE the deploy script. If anything goes wrong on
-      # rishi-1 the script exits non-zero, this job fails BEFORE
-      # touching rishi-2, and rishi-2 stays on the previous healthy
-      # image. Cloudflare DNS round-robin keeps serving 50% of users.
+      # CANARY DEPLOY: rishi-1 first. If anything goes wrong on
+      # rishi-1, the deploy script exits non-zero, this job fails
+      # BEFORE touching rishi-2, and rishi-2 stays on the previous
+      # healthy image. Cloudflare DNS round-robin keeps serving 50%
+      # of users via rishi-2 (zero downtime for half the traffic).
       # ============================================================
 
       # ---------- SERVER 1 (canary) ----------
+
+      # Copy app files to rishi-1 via SCP (Secure Copy over SSH)
       - name: Copy app files to Server 1
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ env.SERVER_1_IP }}
           username: ${{ env.DEPLOY_USER }}
           key: ${{ secrets.HETZNER_BARE_METAL_GITHUB_ACTIONS_SSH_PRIVATE_KEY }}
+          # Copy: docker-compose file, Caddy config template, deploy script,
+          # migration script, SQL migration files, and project config
           source: "docker-compose.yml,caddy/snippet.caddy.template,scripts/ci/deploy-app.sh,scripts/ci/run-migrations.sh,migrations,project.config"
+          # Destination directory on the server
           target: /home/deploy/${{ env.PROJECT_REPO }}
 
+      # Run the deploy script on rishi-1. This script:
+      #   1. Records the currently-running image for potential rollback
+      #   2. Runs SQL migrations (BEFORE starting the new app)
+      #   3. Pulls and starts the new Docker image
+      #   4. Waits up to 90s for the health check to pass
+      #   5. On success: records the tag as "last known good", updates Caddy
+      #   6. On failure: rolls back to the previous image, exits with error
       - name: Deploy + verify + auto-rollback on Server 1 (canary)
         uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ env.SERVER_1_IP }}
           username: ${{ env.DEPLOY_USER }}
           key: ${{ secrets.HETZNER_BARE_METAL_GITHUB_ACTIONS_SSH_PRIVATE_KEY }}
+          # Give the deploy up to 5 minutes (health checks + potential rollback)
           command_timeout: 5m
+          # Pass these environment variables to the remote script
           envs: IMAGE_TAG,DATABASE_URL,SENTRY_DSN,GITHUB_TOKEN,GITHUB_ACTOR,APP_DIR
           script: |
+            # Make the deploy script executable
             chmod +x ${APP_DIR}/scripts/ci/deploy-app.sh
+            # Run the canary deploy (exits non-zero on failure → stops the pipeline)
             ${APP_DIR}/scripts/ci/deploy-app.sh
         env:
+          # The git SHA used as the Docker image tag
           IMAGE_TAG: ${{ github.sha }}
+          # Server 1's database URL (points to haproxy-rishi-1 → DB leader)
           DATABASE_URL: ${{ secrets.DATABASE_URL_SERVER_1 }}
+          # Sentry error tracking DSN (can be empty — deploy script handles that)
           SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          # GHCR credentials
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_ACTOR: ${{ github.actor }}
+          # Path where app files were copied to on the server
           APP_DIR: /home/deploy/${{ env.PROJECT_REPO }}
 
-      # ---------- SERVER 2 (only runs if Server 1 fully succeeded) ----------
+      # ---------- SERVER 2 (only runs if Server 1 FULLY succeeded) ----------
+
+      # Copy app files to rishi-2 (same files as rishi-1)
       - name: Copy app files to Server 2
         uses: appleboy/scp-action@v0.1.7
         with:
@@ -284,6 +491,9 @@ jobs:
           source: "docker-compose.yml,caddy/snippet.caddy.template,scripts/ci/deploy-app.sh,scripts/ci/run-migrations.sh,migrations,project.config"
           target: /home/deploy/${{ env.PROJECT_REPO }}
 
+      # Deploy to rishi-2 (same process as rishi-1).
+      # This step ONLY runs if the rishi-1 deploy succeeded.
+      # If rishi-1 failed, the pipeline already stopped above.
       - name: Deploy + verify + auto-rollback on Server 2
         uses: appleboy/ssh-action@v1.2.0
         with:
@@ -297,6 +507,7 @@ jobs:
             ${APP_DIR}/scripts/ci/deploy-app.sh
         env:
           IMAGE_TAG: ${{ github.sha }}
+          # Server 2's database URL (points to haproxy-rishi-2 → DB leader)
           DATABASE_URL: ${{ secrets.DATABASE_URL_SERVER_2 }}
           SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

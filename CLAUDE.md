@@ -168,12 +168,14 @@ See `SECURITY.md` for the full threat model + deferred TODOs.
 | `scripts/ci/deploy-db-stack.sh` | Swarm stack deploy (etcd + Patroni + HAProxy) |
 | `scripts/ci/run-migrations.sh` | Apply pending SQL migrations via HAProxy |
 | `scripts/restore-from-backup.sh` | Download + restore from S3 backup |
+| `scripts/fix-failed-replicas.sh` | Reinit Patroni replicas in "start failed" state |
 | `scripts/rotate-secrets.sh` | Generate + set new DB passwords |
 | `scripts/strip-database.sh` | Convert to stateless service (no DB) |
 | `tests/` | Unit tests (pytest) + template integrity (shell) |
 | `tests/integration/` | Manual failover + isolation + parity tests |
 | `.github/workflows/deploy.yml` | CI/CD pipeline |
 | `.github/workflows/backup.yml` | Scheduled daily backup |
+| `.github/workflows/infra-health.yml` | 5-min health check + auto-reinit of failed replicas |
 
 ---
 
@@ -205,6 +207,9 @@ bash local/setup.sh && curl http://localhost:8080/
 
 # Check Patroni cluster
 ssh deploy@138.201.137.181 'docker exec $(docker ps -qf name=<stack>_patroni-rishi-1 | head -1) patronictl -c /etc/patroni.yml list'
+
+# Fix failed Patroni replicas (reinit from leader)
+bash scripts/fix-failed-replicas.sh
 
 # Trigger manual backup
 gh workflow run backup.yml

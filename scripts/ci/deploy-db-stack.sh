@@ -102,6 +102,39 @@ fi
 # Make IMAGE_TAG available as an env var for the stack files
 export IMAGE_TAG="${IMAGE_TAG}"
 
+# ----- PRE-FLIGHT: Check cluster health before deploying -----
+# The rolling update strategy (stop-first, 1 at a time) temporarily takes a
+# node offline. If the cluster is already degraded (e.g., replicas in "start
+# failed"), stopping the leader for an update could cause a total outage.
+# We warn about this so CI logs make the risk visible.
+echo ""
+echo "==> Pre-flight: checking Patroni cluster health..."
+PRE_C=$(docker ps -qf "name=${SWARM_STACK}_patroni-rishi" | head -1)
+if [ -n "${PRE_C}" ]; then
+    PRE_LIST=$(docker exec "${PRE_C}" patronictl -c /etc/patroni.yml list 2>/dev/null || echo "")
+    if [ -n "${PRE_LIST}" ]; then
+        echo "${PRE_LIST}"
+        PRE_STREAMING=$(echo "${PRE_LIST}" | grep -c "streaming" || true)
+        PRE_FAILED=$(echo "${PRE_LIST}" | grep -c "start failed" || true)
+        PRE_LEADER=$(echo "${PRE_LIST}" | grep -c "Leader" || true)
+        echo ""
+        if [ "${PRE_FAILED}" -gt 0 ]; then
+            echo "⚠ WARNING: ${PRE_FAILED} Patroni node(s) in 'start failed' state"
+            echo "  Consider running: bash scripts/fix-failed-replicas.sh"
+        fi
+        if [ "${PRE_LEADER}" -ge 1 ] && [ "${PRE_STREAMING}" -lt 2 ]; then
+            echo "⚠ WARNING: cluster is DEGRADED (${PRE_STREAMING}/2 replicas streaming)"
+            echo "  Rolling update may cause brief downtime if the leader is restarted"
+        fi
+        if [ "${PRE_LEADER}" -ge 1 ] && [ "${PRE_STREAMING}" -ge 2 ] && [ "${PRE_FAILED}" -eq 0 ]; then
+            echo "✓ Cluster healthy: ${PRE_LEADER} leader, ${PRE_STREAMING} streaming"
+        fi
+    fi
+else
+    echo "  No existing Patroni containers found (first deploy?)"
+fi
+echo ""
+
 # ----- DEPLOY THE STACK -----
 # "docker stack deploy" creates or updates all services defined in the
 # compose files. It merges multiple files with "-c" (combine).

@@ -1,95 +1,177 @@
-# Docker Stack file for the Patroni + PostgreSQL cluster.
-# Deployed via CI with: docker stack deploy --compose-file patroni-stack.yml ${SWARM_STACK}
+# ---------------------------------------------------------------------------
+# patroni/stack.yml — Docker Swarm stack for the 3-node Patroni + PostgreSQL
+# cluster.
 #
-# All ${VAR} interpolations come from the SHELL ENV (project.config sourced
-# with `set -a` by scripts/ci/deploy-db-stack.sh).
+# WHAT IS PATRONI?
+# Patroni is a manager for PostgreSQL that turns 3 independent database
+# servers into a HIGH AVAILABILITY cluster. It:
+#   - Keeps one server as the "leader" (primary) that handles all writes
+#   - Keeps the other 2 servers as "replicas" that mirror the leader's data
+#   - Automatically promotes a replica to leader if the leader crashes
+#   - Uses etcd (a separate service) to coordinate who is the leader
+#
+# HOW IS THIS FILE USED?
+# CI runs: docker stack deploy -c patroni-stack.yml ${SWARM_STACK}
+# This creates 3 Patroni containers (each running PostgreSQL inside),
+# one on each server, connected via the private overlay network.
+#
+# WHAT ARE THE ${VAR} THINGS?
+# Variables from project.config. Before calling "docker stack deploy",
+# the deploy script runs "set -a; source project.config; set +a" which
+# loads all KEY=value pairs into the shell. Docker Swarm then substitutes
+# ${VAR} with the real values.
 #
 # WHY service names like "patroni-rishi-1"?
 # Swarm DNS automatically resolves service names on the overlay network.
 # Each Patroni node tells the others: "reach me at patroni-rishi-1:5432".
 #
-# WHY no "ports:"?
+# WHY no "ports:" section?
 # Patroni and PostgreSQL are ONLY on db-internal — invisible to the internet.
 # HAProxy (also on db-internal) routes app traffic to the current primary.
 #
 # WHY Docker Swarm secrets instead of env vars for passwords?
 # Env vars are visible in `docker inspect` and `docker service inspect` to
 # anyone in the docker group. Secrets are mounted as files in /run/secrets/
-# (tmpfs) and never appear in any inspect output. The entrypoint.sh in the
-# Patroni image reads them and exports as env vars only inside the container.
+# (tmpfs = temporary filesystem in RAM) and never appear in any inspect output.
+# The entrypoint.sh in the Patroni image reads them and exports as env vars
+# only inside the container.
 #
 # WHY PATRONI_SCOPE env var instead of `scope:` in patroni.yml?
 # Patroni does NOT do `${VAR}` substitution in YAML. It DOES respect
 # PATRONI_<KEY> env vars that override YAML values. We set PATRONI_SCOPE
 # here from the project.config and Patroni picks it up at startup,
 # overriding the placeholder line in patroni/patroni.yml.
+# ---------------------------------------------------------------------------
 
+# Docker Compose format version (3.8 supports all Swarm features we use)
 version: "3.8"
 
+# SERVICES: each service becomes a running container on a specific server.
+# We define 3 Patroni services — one per physical server.
 services:
+
+  # ----- Patroni on rishi-1 (Server 1) -----
   patroni-rishi-1:
+    # The Docker image to run. ${PATRONI_IMAGE_REPO} is the GHCR path
+    # (e.g., ghcr.io/dolr-ai/yral-my-service-patroni). ${IMAGE_TAG:-latest}
+    # uses the git SHA in CI, or "latest" if IMAGE_TAG isn't set.
     image: ${PATRONI_IMAGE_REPO}:${IMAGE_TAG:-latest}
+
+    # ENVIRONMENT VARIABLES: configuration values passed into the container.
+    # Patroni reads PATRONI_* env vars and uses them to override its YAML config.
     environment:
+      # This node's unique name within the Patroni cluster
       PATRONI_NAME: rishi-1
+
+      # The cluster name — ALL 3 nodes must have the SAME scope to form one cluster.
+      # Comes from project.config (e.g., "my-service-cluster").
       PATRONI_SCOPE: ${PATRONI_SCOPE}
-      # Patroni native env vars: tells other nodes how to reach this one
+
+      # Patroni has a REST API (HTTP) for health checks and cluster management.
+      # This tells other nodes: "to reach my REST API, connect to patroni-rishi-1:8008"
       PATRONI_RESTAPI_CONNECT_ADDRESS: "patroni-rishi-1:8008"
+
+      # This tells other nodes: "to reach my PostgreSQL database, connect to
+      # patroni-rishi-1:5432" (5432 is PostgreSQL's standard port)
       PATRONI_POSTGRESQL_CONNECT_ADDRESS: "patroni-rishi-1:5432"
-      # Patroni native auth — usernames are non-sensitive (passwords come from secrets)
+
+      # Database usernames (NOT passwords — passwords come from secrets below).
+      # "postgres" is the superuser (full admin access).
       PATRONI_SUPERUSER_USERNAME: postgres
+      # "replicator" is the user that replica servers use to copy data from the leader.
       PATRONI_REPLICATION_USERNAME: replicator
+      # "rewind_user" is used by pg_rewind to resync a server that fell behind.
       PATRONI_REWIND_USERNAME: rewind_user
-      # Read by post_init.sh to know which database to create
+
+      # The name of the database to create. Read by post_init.sh
+      # (a script that runs once when the cluster is first created).
       POSTGRES_DB: ${POSTGRES_DB}
+
+    # SECRETS: sensitive values mounted as files at /run/secrets/ inside the container.
+    # These are Docker Swarm secrets (defined at the bottom of this file).
     secrets:
+      # Mounted at /run/secrets/postgres_password — the superuser's password
       - postgres_password
+      # Mounted at /run/secrets/replication_password — used by replicas to connect
       - replication_password
+
+    # VOLUMES: persistent storage that survives container restarts.
+    # "patroni-rishi-1-data:/data/patroni" means:
+    #   - Docker creates a named volume called "patroni-rishi-1-data" (or reuses it)
+    #   - Mounts it inside the container at /data/patroni
+    #   - This is where ALL database files live (tables, indexes, WAL logs, etc.)
     volumes:
       - patroni-rishi-1-data:/data/patroni
+
+    # Join the private overlay network (same network etcd and HAProxy are on).
+    # This network spans all 3 servers but is invisible from the internet.
     networks:
       - db-internal
+
+    # DEPLOY: Docker Swarm-specific settings (these don't apply to regular docker-compose)
     deploy:
+      # Run this container ONLY on the server labeled "server=rishi-1".
+      # Labels are set by scripts/swarm-setup.sh or scripts/add-server.sh.
       placement:
         constraints:
           - node.labels.server == rishi-1
+
+      # If the container crashes, Swarm restarts it automatically.
+      # max_attempts=10, window=120s: give up after 10 restarts within 2 minutes
+      # (prevents infinite restart loops that burn CPU and fill logs)
       restart_policy:
         condition: any
         max_attempts: 10
         window: 120s
-      # Rolling update: ONE container at a time, with 30s gap.
-      # WHY: Patroni cluster needs quorum (2 of 3) to elect a leader. If
-      # Swarm recreates all 3 containers simultaneously (e.g. on a config
-      # change), the cluster loses quorum, PostgreSQL lock files get
-      # corrupted, and recovery requires manual intervention. Rolling
-      # ensures the cluster always has 2/3 nodes alive during updates.
+
+      # ROLLING UPDATE: when the image changes, update containers ONE AT A TIME.
+      # WHY? Patroni cluster needs quorum (2 of 3 nodes running) to elect a leader.
+      # If Swarm recreated all 3 containers at once, the cluster would lose quorum,
+      # PostgreSQL lock files could get corrupted, and recovery would need manual work.
+      #   parallelism: 1    = update 1 container at a time
+      #   delay: 30s        = wait 30 seconds between updates (let the cluster stabilize)
+      #   order: stop-first = stop the old container before starting the new one
+      #   failure_action: rollback = if the new version fails, go back to the old one
       update_config:
         parallelism: 1
         delay: 30s
         order: stop-first
         failure_action: rollback
 
+  # ----- Patroni on rishi-2 (Server 2 — identical config, different server) -----
   patroni-rishi-2:
+    # Same image as rishi-1 — all nodes run the same Patroni version
     image: ${PATRONI_IMAGE_REPO}:${IMAGE_TAG:-latest}
     environment:
+      # Different name so Patroni knows this is a DIFFERENT node
       PATRONI_NAME: rishi-2
+      # Same scope — same cluster as rishi-1
       PATRONI_SCOPE: ${PATRONI_SCOPE}
+      # Advertise THIS node's addresses (not rishi-1's)
       PATRONI_RESTAPI_CONNECT_ADDRESS: "patroni-rishi-2:8008"
       PATRONI_POSTGRESQL_CONNECT_ADDRESS: "patroni-rishi-2:5432"
+      # Same usernames as rishi-1 (passwords come from the same shared secrets)
       PATRONI_SUPERUSER_USERNAME: postgres
       PATRONI_REPLICATION_USERNAME: replicator
       PATRONI_REWIND_USERNAME: rewind_user
+      # Same database name
       POSTGRES_DB: ${POSTGRES_DB}
+    # Same secrets — all nodes need the same passwords to authenticate with each other
     secrets:
       - postgres_password
       - replication_password
+    # Separate volume — rishi-2 has its own copy of the data
     volumes:
       - patroni-rishi-2-data:/data/patroni
+    # Same private network
     networks:
       - db-internal
     deploy:
+      # Pin to Server 2
       placement:
         constraints:
           - node.labels.server == rishi-2
+      # Same restart and update policies as rishi-1
       restart_policy:
         condition: any
         max_attempts: 10
@@ -100,28 +182,40 @@ services:
         order: stop-first
         failure_action: rollback
 
+  # ----- Patroni on rishi-3 (Server 3 — identical config, different server) -----
   patroni-rishi-3:
+    # Same image as rishi-1 and rishi-2
     image: ${PATRONI_IMAGE_REPO}:${IMAGE_TAG:-latest}
     environment:
+      # Different name so Patroni knows this is a DIFFERENT node
       PATRONI_NAME: rishi-3
+      # Same scope — same cluster
       PATRONI_SCOPE: ${PATRONI_SCOPE}
+      # Advertise THIS node's addresses
       PATRONI_RESTAPI_CONNECT_ADDRESS: "patroni-rishi-3:8008"
       PATRONI_POSTGRESQL_CONNECT_ADDRESS: "patroni-rishi-3:5432"
+      # Same usernames
       PATRONI_SUPERUSER_USERNAME: postgres
       PATRONI_REPLICATION_USERNAME: replicator
       PATRONI_REWIND_USERNAME: rewind_user
+      # Same database name
       POSTGRES_DB: ${POSTGRES_DB}
+    # Same secrets
     secrets:
       - postgres_password
       - replication_password
+    # Separate volume — rishi-3 has its own copy of the data
     volumes:
       - patroni-rishi-3-data:/data/patroni
+    # Same private network
     networks:
       - db-internal
     deploy:
+      # Pin to Server 3
       placement:
         constraints:
           - node.labels.server == rishi-3
+      # Same restart and update policies
       restart_policy:
         condition: any
         max_attempts: 10
@@ -132,35 +226,58 @@ services:
         order: stop-first
         failure_action: rollback
 
-# Docker Swarm secrets — created externally by CI before stack deploy.
+# ---------------------------------------------------------------------------
+# SECRETS: Docker Swarm secrets — created externally by CI before stack deploy.
+#
 # WHY namespaced names (${SWARM_STACK}_*)?
 # Docker Swarm secrets are CLUSTER-WIDE, not per-stack. If two services
 # share the cluster, they would conflict on a generic name like
-# `postgres_password`. Namespacing with the stack name keeps them isolated.
-# The `target:` keeps the path inside the container as /run/secrets/postgres_password
+# "postgres_password". Namespacing with the stack name keeps them isolated.
+# The "name:" field is the real name in the cluster (e.g., "my-service-db_postgres_password").
+# The key above (e.g., "postgres_password") is the alias used inside the container,
 # so the entrypoint and post_init.sh don't need to know about the namespace.
+# ---------------------------------------------------------------------------
 secrets:
+  # The PostgreSQL superuser password
   postgres_password:
+    # "external: true" means "this secret already exists in the Swarm — don't try to create it"
     external: true
+    # The real name in the Swarm cluster (e.g., "my-service-db_postgres_password")
     name: ${SWARM_STACK}_postgres_password
+  # The password used by replica servers to replicate data from the leader
   replication_password:
     external: true
     name: ${SWARM_STACK}_replication_password
 
+# ---------------------------------------------------------------------------
+# NETWORKS: the Docker overlay network that connects all DB services.
+# ---------------------------------------------------------------------------
 networks:
-  # Same definition as in etcd/stack.yml — the 3 stack files are merged
-  # by `docker stack deploy --compose-file ... --compose-file ...`, so
-  # all references to this network must agree.
+  # Same network definition as in etcd/stack.yml — when the 3 stack files
+  # (etcd, patroni, haproxy) are merged by `docker stack deploy --compose-file
+  # ... --compose-file ...`, all references to this network must agree.
   db-internal:
+    # "overlay" = a virtual network that spans multiple physical servers
     driver: overlay
+    # "attachable" = non-Swarm containers (like the app) can also join this network
     attachable: true
+    # "name" = the actual Docker network name. Without this, Docker prefixes
+    # it with the stack name, which can exceed the 63-character limit.
     name: ${OVERLAY_NETWORK}
 
-# IMPORTANT: these volumes contain ALL database data. `docker system prune
-# --volumes` will DELETE them if the container happens to be stopped during
-# a rolling update. The daily backup to S3 is the primary data protection.
-# See SECURITY.md "deferred TODOs" for bind-mount alternative.
+# ---------------------------------------------------------------------------
+# VOLUMES: persistent storage for each Patroni node's database files.
+#
+# IMPORTANT: these volumes contain ALL database data. Running
+# `docker system prune --volumes` will DELETE them if the container happens
+# to be stopped during a rolling update. The daily backup to S3 is the
+# primary data protection. See SECURITY.md "deferred TODOs" for the
+# bind-mount alternative that would prevent accidental pruning.
+# ---------------------------------------------------------------------------
 volumes:
+  # rishi-1's database files (stored on Server 1's disk)
   patroni-rishi-1-data:
+  # rishi-2's database files (stored on Server 2's disk)
   patroni-rishi-2-data:
+  # rishi-3's database files (stored on Server 3's disk)
   patroni-rishi-3-data:
