@@ -336,16 +336,28 @@ set_secret REPLICATION_PASSWORD  "${REPL_PASS}"
 set_secret DATABASE_URL_SERVER_1 "${DB_URL_1}"
 set_secret DATABASE_URL_SERVER_2 "${DB_URL_2}"
 # S3 backup credentials (shared across all dolr-ai services — same bucket,
-# per-project prefix). Read from local config files at ~/.config/dolr-ai/.
+# per-project prefix). Read from macOS Keychain where they're stored encrypted.
 # These are set once by the infra admin and reused for every new service.
-S3_CREDS_DIR="${HOME}/.config/dolr-ai"
-if [ -f "${S3_CREDS_DIR}/s3-access-key" ] && [ -f "${S3_CREDS_DIR}/s3-secret-key" ]; then
-    set_secret BACKUP_S3_ACCESS_KEY "$(cat "${S3_CREDS_DIR}/s3-access-key")"
-    set_secret BACKUP_S3_SECRET_KEY "$(cat "${S3_CREDS_DIR}/s3-secret-key")"
+#
+# WHY KEYCHAIN, NOT A FILE?
+# The SSH key lives in ~/.ssh/ (standard practice for SSH keys). But S3
+# credentials are NOT expected on disk — storing them in a plaintext file
+# is a security risk. macOS Keychain encrypts them at rest and requires
+# authentication to access.
+#
+# HOW TO SET THEM (one-time setup by the infra admin):
+#   security add-generic-password -a "dolr-ai" -s "BACKUP_S3_ACCESS_KEY" -w "YOUR_KEY" -U
+#   security add-generic-password -a "dolr-ai" -s "BACKUP_S3_SECRET_KEY" -w "YOUR_SECRET" -U
+S3_AK=$(security find-generic-password -a "dolr-ai" -s "BACKUP_S3_ACCESS_KEY" -w 2>/dev/null || echo "")
+S3_SK=$(security find-generic-password -a "dolr-ai" -s "BACKUP_S3_SECRET_KEY" -w 2>/dev/null || echo "")
+if [ -n "${S3_AK}" ] && [ -n "${S3_SK}" ]; then
+    set_secret BACKUP_S3_ACCESS_KEY "${S3_AK}"
+    set_secret BACKUP_S3_SECRET_KEY "${S3_SK}"
 else
-    warn "S3 backup credentials not found at ${S3_CREDS_DIR}/s3-access-key"
-    warn "Backups will not work until BACKUP_S3_ACCESS_KEY + BACKUP_S3_SECRET_KEY are set."
-    warn "Save them: mkdir -p ${S3_CREDS_DIR} && echo 'KEY' > ${S3_CREDS_DIR}/s3-access-key && echo 'SECRET' > ${S3_CREDS_DIR}/s3-secret-key"
+    warn "S3 backup credentials not found in macOS Keychain"
+    warn "Backups will not work until they're stored. Run:"
+    warn '  security add-generic-password -a "dolr-ai" -s "BACKUP_S3_ACCESS_KEY" -w "YOUR_KEY" -U'
+    warn '  security add-generic-password -a "dolr-ai" -s "BACKUP_S3_SECRET_KEY" -w "YOUR_SECRET" -U'
 fi
 # Sentry DSN is optional — only set if provided via --sentry-dsn
 [ -n "${SENTRY_DSN}" ] && set_secret SENTRY_DSN "${SENTRY_DSN}"

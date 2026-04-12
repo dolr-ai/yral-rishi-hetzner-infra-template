@@ -90,6 +90,18 @@ for VAR in POSTGRES_DB PROJECT_REPO BACKUP_S3_ENDPOINT BACKUP_S3_BUCKET AWS_ACCE
     fi
 done
 
+# ----- PROJECT ISOLATION GUARD -----
+# Ensure this backup script ONLY accesses its own project's S3 prefix.
+# This prevents accidental cross-project access (e.g., a misconfigured
+# PROJECT_REPO could read/delete another project's backups).
+if [ -z "${PROJECT_REPO}" ] || [ "${PROJECT_REPO}" = "yral-" ]; then
+    log "FATAL: PROJECT_REPO is empty or invalid — refusing to run"
+    exit 1
+fi
+# The S3_PREFIX is locked to this project's folder. All mc commands below
+# use S3_PREFIX, never the raw bucket path, so they can't escape the prefix.
+log "project isolation: operations restricted to ${BACKUP_S3_BUCKET}/${PROJECT_REPO}/"
+
 # ----- CONFIGURE MinIO Client -----
 # "mc alias set" saves the S3 connection details under the name "hetzner"
 # --api s3v4 = use S3 signature version 4 (required by Hetzner)

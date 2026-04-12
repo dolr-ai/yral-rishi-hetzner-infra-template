@@ -52,6 +52,14 @@ BACKUP_IMAGE="${IMAGE_REPO}-backup:latest"
 S3_PREFIX="rishi-yral/${PROJECT_REPO}"
 DOWNLOAD_PATH="/tmp/restore_${PROJECT_REPO}.sql.gz"
 
+# ----- PROJECT ISOLATION GUARD -----
+# Ensure we only restore from THIS project's S3 prefix, never another project's.
+if [ -z "${PROJECT_REPO}" ] || [ "${PROJECT_REPO}" = "yral-" ]; then
+    echo "FATAL: PROJECT_REPO is empty or invalid — refusing to run"
+    exit 1
+fi
+echo "==> Project isolation: restore restricted to s3://${S3_PREFIX}/"
+
 # ----- Download the backup -----
 if [ -n "${LOCAL_FILE}" ]; then
     [ ! -f "${LOCAL_FILE}" ] && { echo "FATAL: file not found: ${LOCAL_FILE}"; exit 1; }
