@@ -134,8 +134,9 @@ jobs:
             echo "==> Schema migrations:"
             docker exec -e PGPASSWORD="$PGPASSWORD" "$C" psql -h haproxy-rishi-1 -U postgres -d ${POSTGRES_DB} -c "SELECT * FROM schema_migrations ORDER BY filename;" 2>/dev/null || echo "(no schema_migrations table)"
 
-            # Clean up
-            rm -f /tmp/restore.sql.gz
+            # Clean up — the file was created by a Docker container (as root),
+            # so the deploy user may not own it. Use sudo or docker to remove it.
+            docker run --rm -v /tmp:/tmp alpine rm -f /tmp/restore.sql.gz 2>/dev/null || rm -f /tmp/restore.sql.gz 2>/dev/null || true
 
         env:
           BACKUP_S3_ACCESS_KEY: ${{ secrets.BACKUP_S3_ACCESS_KEY }}
