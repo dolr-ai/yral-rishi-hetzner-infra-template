@@ -62,7 +62,12 @@ That single command does ALL of the following:
 6. `git init` + initial commit
 7. `gh repo create dolr-ai/yral-<name> --public`
 8. `git push -u origin main`
-9. Sets all 5 GitHub Secrets (`HETZNER_BARE_METAL_GITHUB_ACTIONS_SSH_PRIVATE_KEY`, `POSTGRES_PASSWORD`, `REPLICATION_PASSWORD`, `DATABASE_URL_SERVER_1`, `DATABASE_URL_SERVER_2`)
+9. Sets all 7 GitHub Secrets automatically:
+   - `HETZNER_BARE_METAL_GITHUB_ACTIONS_SSH_PRIVATE_KEY` (from `~/.ssh/rishi-hetzner-ci-key`)
+   - `POSTGRES_PASSWORD` + `REPLICATION_PASSWORD` (generated via openssl)
+   - `DATABASE_URL_SERVER_1` + `DATABASE_URL_SERVER_2` (composed from above)
+   - `BACKUP_S3_ACCESS_KEY` + `BACKUP_S3_SECRET_KEY` (from macOS Keychain)
+   Backups work from day one — no manual S3 secret setup needed.
 10. Watches the first CI run to completion
 11. Verifies `https://<name>.rishi.yral.com/health` returns 200
 
@@ -88,6 +93,20 @@ bash tests/integration/run_all.sh
 ```
 
 All 4 tests must pass: server failover, server+leader failover, project isolation, image parity.
+
+### One-time prerequisite: S3 backup credentials in macOS Keychain
+
+Before creating your first service, store the shared S3 credentials in
+macOS Keychain (encrypted, never on disk). This is done ONCE and reused
+by every future `new-service.sh` invocation:
+
+```bash
+security add-generic-password -a "dolr-ai" -s "BACKUP_S3_ACCESS_KEY" -w "YOUR_ACCESS_KEY" -U
+security add-generic-password -a "dolr-ai" -s "BACKUP_S3_SECRET_KEY" -w "YOUR_SECRET_KEY" -U
+```
+
+Get the keys from the Hetzner Object Storage console. If already set up,
+`new-service.sh` reads them automatically — nothing to do.
 
 ### Need to add Sentry?
 

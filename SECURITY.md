@@ -38,8 +38,26 @@ Read this before changing any of them.
 | `POSTGRES_PASSWORD` | GitHub Secrets → Swarm secret | `bash scripts/rotate-secrets.sh --apply` |
 | `REPLICATION_PASSWORD` | GitHub Secrets → Swarm secret | `bash scripts/rotate-secrets.sh --apply` |
 | `DATABASE_URL_SERVER_1/2` | GitHub Secrets → Docker secret file | Auto-rotated by `rotate-secrets.sh` |
+| `BACKUP_S3_ACCESS_KEY` | macOS Keychain → GitHub Secrets | Rotate in Hetzner console, update Keychain: `security add-generic-password -a dolr-ai -s BACKUP_S3_ACCESS_KEY -w NEW_KEY -U`, then re-set on each repo |
+| `BACKUP_S3_SECRET_KEY` | macOS Keychain → GitHub Secrets | Same as above |
 | `SENTRY_DSN` | GitHub Secrets → env var | Manually via Sentry UI + `gh secret set SENTRY_DSN` |
 | `VAULT_TOKEN` (if used) | GitHub Secrets → Docker secret file | Re-issue from Vault, `gh secret set VAULT_TOKEN` |
+
+### S3 backup credential flow
+
+```
+macOS Keychain (encrypted at rest)
+  ↓ new-service.sh reads via `security find-generic-password`
+GitHub Secrets (per-repo, encrypted at rest)
+  ↓ backup.yml passes to backup container as env vars
+backup.sh configures mc alias → uploads to S3
+  ↓ scoped to s3://rishi-yral/${PROJECT_REPO}/ (project isolation)
+```
+
+S3 credentials are SHARED across all dolr-ai services (same Hetzner bucket).
+Project isolation is enforced at the application level: `backup.sh` and
+`restore-from-backup.sh` validate PROJECT_REPO and lock all operations to
+the project's own S3 prefix. One project cannot access another's backups.
 
 **Never** check secrets into the repo. The `.gitleaks.toml` allowlist only
 permits documented placeholder strings. If gitleaks flags a real secret,
