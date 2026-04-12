@@ -15,7 +15,7 @@ fastapi==0.115.12
 
 # Uvicorn — the web server that RUNS FastAPI. Listens on port 8000
 # and feeds incoming HTTP requests to FastAPI.
-uvicorn==0.34.0
+uvicorn==0.44.0
 
 # Sentry SDK — error tracking. Catches crashes and sends them to
 # apm.yral.com. The [fastapi] extra adds FastAPI-specific integration.
