@@ -61,6 +61,13 @@ log "Test 5: app-CONTAINER failover for ${URL}"
 log "victims: ${VICTIMS[*]}"
 
 # Baseline — service must be 100% healthy before we start breaking things.
+# We also decide here whether the service's root response exposes a useful
+# "counter" that advances per-request: counter-style services (like the
+# template) embed a request-scoped integer; stateless APIs (like chat-ai)
+# return a static JSON envelope with a version number that never changes.
+# If the counter doesn't advance during baseline, we skip the counter-
+# advancing check during post-recovery so the test isn't mis-failed on a
+# non-counter service. 200-status assertions still apply in both modes.
 log "baseline: 5 hits"
 for i in 1 2 3 4 5; do
     if ! curl_ok "${URL}"; then
@@ -70,7 +77,18 @@ for i in 1 2 3 4 5; do
 done
 START=$(get_counter "${URL}")
 [ -n "${START}" ] || { fail "could not parse counter from baseline response"; exit 1; }
-pass "baseline OK, counter=${START}"
+# Probe once more — if the counter ticked up, treat this as a counter-style
+# service. Otherwise, record that counter checks should be skipped.
+sleep 1
+BASELINE_SECOND=$(get_counter "${URL}")
+COUNTER_AVAILABLE=0
+if [ -n "${BASELINE_SECOND}" ] && [ "${BASELINE_SECOND}" -gt "${START}" ]; then
+    COUNTER_AVAILABLE=1
+    START=${BASELINE_SECOND}
+    pass "baseline OK, counter advancing (now ${START})"
+else
+    pass "baseline OK, static response (counter check will be skipped)"
+fi
 
 for VICTIM in "${VICTIMS[@]}"; do
     VICTIM_IP=$(server_ip_for "${VICTIM}")
@@ -134,10 +152,15 @@ for VICTIM in "${VICTIMS[@]}"; do
     # Victim is back up; cleanup no longer needs to touch it.
     CURRENT_VICTIM=""
 
-    # Post-recovery steady-state — all 20 should succeed and the counter
-    # must advance (if it doesn't, Caddy might be serving a cached response
-    # or both origins are still dysfunctional).
-    log "post-recovery: 20 requests, expect all 200 + counter advancing"
+    # Post-recovery steady-state — all 20 must return 200. For counter-style
+    # services we also require the counter to advance (proves we're hitting a
+    # live app, not a stale/cached response). For static-response services
+    # (COUNTER_AVAILABLE=0, decided during baseline) we require only 200s.
+    if [ "${COUNTER_AVAILABLE}" = "1" ]; then
+        log "post-recovery: 20 requests, expect all 200 + counter advancing"
+    else
+        log "post-recovery: 20 requests, expect all 200 (counter check skipped)"
+    fi
     POST_SUCCESS=0
     POST_PREV=$(get_counter "${URL}")
     [ -n "${POST_PREV}" ] || POST_PREV=${PREV_COUNTER}
@@ -145,12 +168,16 @@ for VICTIM in "${VICTIMS[@]}"; do
         CODE=$(curl -sk -o /tmp/_t5_resp.$$ -w '%{http_code}' --max-time 8 "${URL}" 2>/dev/null || echo "000")
         RESP=$(cat /tmp/_t5_resp.$$ 2>/dev/null); rm -f /tmp/_t5_resp.$$
         if [ "${CODE}" = "200" ]; then
-            N=$(echo "${RESP}" | grep -oE '[0-9]+' | head -1)
-            if [ -n "${N}" ] && [ "${N}" -gt "${POST_PREV}" ]; then
-                POST_SUCCESS=$((POST_SUCCESS+1))
-                POST_PREV=${N}
+            if [ "${COUNTER_AVAILABLE}" = "1" ]; then
+                N=$(echo "${RESP}" | grep -oE '[0-9]+' | head -1)
+                if [ -n "${N}" ] && [ "${N}" -gt "${POST_PREV}" ]; then
+                    POST_SUCCESS=$((POST_SUCCESS+1))
+                    POST_PREV=${N}
+                else
+                    log "  [$i] 200 but counter stuck at ${N} (prev ${POST_PREV})"
+                fi
             else
-                log "  [$i] 200 but counter stuck at ${N} (prev ${POST_PREV})"
+                POST_SUCCESS=$((POST_SUCCESS+1))
             fi
         else
             log "  [$i] FAIL code=${CODE}"
@@ -158,9 +185,13 @@ for VICTIM in "${VICTIMS[@]}"; do
         sleep 0.5
     done
     if [ "${POST_SUCCESS}" -eq 20 ]; then
-        pass "post-recovery on ${VICTIM}: 20/20 succeeded and counter advanced"
+        if [ "${COUNTER_AVAILABLE}" = "1" ]; then
+            pass "post-recovery on ${VICTIM}: 20/20 succeeded and counter advanced"
+        else
+            pass "post-recovery on ${VICTIM}: 20/20 succeeded (200 OK)"
+        fi
     else
-        fail "post-recovery on ${VICTIM}: only ${POST_SUCCESS}/20 succeeded with advancing counter"
+        fail "post-recovery on ${VICTIM}: only ${POST_SUCCESS}/20 met success criteria"
     fi
 
     START=${POST_PREV}
