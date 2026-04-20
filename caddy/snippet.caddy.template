@@ -14,10 +14,28 @@
 # security, and routing.
 #
 # WHAT IS A TEMPLATE?
-# This file contains ${PROJECT_DOMAIN} and ${PROJECT_REPO} which are
-# PLACEHOLDER variables. At deploy time, the CI script replaces them
-# with real values from project.config using `sed` (a text replacement tool).
-# The rendered file is saved as /home/deploy/caddy/conf.d/${PROJECT_REPO}.caddy
+# This file contains ${PROJECT_DOMAIN}, ${PROJECT_REPO}, ${LOCAL_UPSTREAM},
+# and ${PEER_UPSTREAMS} which are PLACEHOLDER variables. At deploy time,
+# the CI script replaces them with real values from project.config +
+# servers.config using `sed` (a text replacement tool). The rendered file
+# is saved as /home/deploy/caddy/conf.d/${PROJECT_REPO}.caddy
+#
+# LOCAL vs PEER UPSTREAMS (why there are two):
+# `reverse_proxy LOCAL PEER1 PEER2 ...` tells Caddy about every app replica
+# in the cluster. With `lb_policy first` + an active `health_uri` probe,
+# Caddy always prefers the first HEALTHY upstream — so under normal
+# conditions 100% of traffic stays on the LOCAL container (zero extra
+# network hops). If the local container dies, Caddy automatically forwards
+# to the peer across the Swarm overlay network. Without this, Caddy would
+# return 502s on every request hitting the dead origin — which Cloudflare
+# does NOT retry onto the other origin (its plain proxy doesn't health-check).
+# See RUNBOOK section 4 for the incident that motivated this design.
+#
+# deploy-app.sh substitutes the two placeholders per host:
+#   LOCAL_UPSTREAM   = "<repo>-<this-host>:8000"          (one token)
+#   PEER_UPSTREAMS   = "<repo>-<peer1>:8000 <repo>-<peer2>:8000 ..."
+#                      (space-separated, one per entry in APP_SERVERS
+#                      minus self; empty if only one app host is configured)
 #
 # HOW CADDY FINDS THIS FILE:
 # Caddy's main config file (/home/deploy/caddy/Caddyfile) contains just:
@@ -95,7 +113,45 @@ ${PROJECT_DOMAIN} {
     #     }
     # }
 
-    reverse_proxy ${PROJECT_REPO}:8000 {
+    # ----- Reverse proxy with multi-upstream failover -----
+    # LOCAL first, PEERS second. Caddy actively probes /health on every
+    # upstream every 2s; an upstream that returns non-2xx (or is
+    # unreachable) twice in a row is quarantined for 10s. `lb_policy first`
+    # means Caddy picks the first HEALTHY upstream — so under normal
+    # conditions 100% of traffic stays on the local app. If the local
+    # container dies, traffic transparently flows to the peer over the
+    # Swarm overlay network until the local container recovers.
+    #
+    # Why the specific timing knobs:
+    #   - ACTIVE check: health_uri /health every 2s. A single failed probe
+    #     marks the upstream unhealthy and takes it out of rotation.
+    #   - PASSIVE check: max_fails 2 within fail_duration 10s. Real user
+    #     requests that return 5xx or take >3s count as fails. This catches
+    #     a half-dead upstream faster than the 2s active probe would.
+    #   - lb_try_duration 5s + lb_try_interval 250ms: if the chosen upstream
+    #     fails the dial mid-request, Caddy retries onto the next upstream
+    #     BEFORE the user sees a 502. This is the core user-facing promise.
+    #   - dial_timeout 1s: a TCP-black-hole origin fails fast instead of
+    #     hanging the whole request for Caddy's default 30s.
+    #   - unhealthy_status 5xx / unhealthy_latency 3s: passive-fail triggers.
+    reverse_proxy ${LOCAL_UPSTREAM} ${PEER_UPSTREAMS} {
+        lb_policy first
+        lb_try_duration 5s
+        lb_try_interval 250ms
+
+        health_uri /health
+        health_interval 2s
+        health_timeout 1s
+
+        fail_duration 10s
+        max_fails 2
+        unhealthy_status 5xx
+        unhealthy_latency 3s
+
+        transport http {
+            dial_timeout 1s
+        }
+
         # Pass real client info to the app
         header_up X-Real-IP {remote_host}
         header_up X-Forwarded-For {remote_host}

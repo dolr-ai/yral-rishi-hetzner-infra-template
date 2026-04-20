@@ -71,8 +71,15 @@ done
 
 log "results: ${SUCCESS}/10 success, ${FAIL_COUNT}/10 failed"
 
-if [ "${SUCCESS}" -ge 9 ]; then
-    pass "≥9/10 requests succeeded with rishi-1 down (Cloudflare RR failover working)"
+# Tightened from the old "-ge 9" threshold. With Caddy fully stopped on
+# rishi-1, that origin's port 443 refuses TCP — Cloudflare detects this
+# within its default probe window and cleanly routes every request to
+# rishi-2. Anything less than 10/10 here signals a real regression in
+# Cloudflare's origin-unreachable handling, not an inherent failover flap.
+# The in-between failure mode (Caddy alive but app container dead — which
+# produces 502s that Cloudflare passes through) is covered by test_05.
+if [ "${SUCCESS}" -eq 10 ]; then
+    pass "10/10 requests succeeded with rishi-1 down (Cloudflare RR failover working)"
 else
     fail "only ${SUCCESS}/10 requests succeeded with rishi-1 down — Cloudflare RR failover NOT working as expected"
 fi
