@@ -46,13 +46,69 @@ fi
 # Change into the app directory (all subsequent commands run from here)
 cd "${APP_DIR}"
 
-# Load project.config into the shell's environment.
+# Load project.config AND servers.config into the shell's environment.
 # "set -a" = auto-export all variables (so docker compose can see them).
 # "source" reads the file and executes each line (loading KEY=value pairs).
 # "set +a" = turn off auto-export.
+#
+# servers.config is needed here (not just in CI) because this script derives
+# SERVER_NAME (from the local IPs) and PEER_UPSTREAMS (from APP_SERVERS)
+# so the Caddy snippet can be rendered per-host. The CI workflow copies
+# servers.config alongside project.config into APP_DIR.
 set -a
 source ./project.config
+source ./servers.config
 set +a
+
+# ----------------------------------------------------------------------
+# Determine which server we're running on (rishi-1 / rishi-2 / ...)
+# ----------------------------------------------------------------------
+# We compare our local IPs against SERVER_<n>_IP entries in servers.config
+# so the script is self-contained — CI doesn't have to pass SERVER_NAME in.
+# Using `ip -4 addr` because `hostname -I` behavior varies across distros.
+OUR_IPS=$(ip -4 addr show 2>/dev/null | grep -oE 'inet [0-9.]+' | awk '{print $2}')
+SERVER_NAME=""
+# Iterate over every SERVER_<n>_IP variable exported from servers.config.
+# `compgen -v SERVER_` lists variable names starting with SERVER_; we keep
+# only the *_IP ones so APP_SERVERS / DEPLOY_USER don't get scanned.
+for var in $(compgen -v SERVER_ | grep '_IP$'); do
+    ip_val="${!var}"
+    if echo "${OUR_IPS}" | grep -qxF "${ip_val}"; then
+        # SERVER_1_IP → rishi-1, SERVER_2_IP → rishi-2, etc.
+        n=$(echo "${var}" | sed -E 's/^SERVER_([0-9]+)_IP$/\1/')
+        SERVER_NAME="rishi-${n}"
+        break
+    fi
+done
+if [ -z "${SERVER_NAME}" ]; then
+    echo "FATAL: could not determine SERVER_NAME from local IPs:"
+    echo "${OUR_IPS}"
+    echo "Expected one of them to match SERVER_<n>_IP in servers.config"
+    exit 1
+fi
+# Exported so `docker compose up` can interpolate ${SERVER_NAME} in
+# docker-compose.yml (the per-host overlay-network alias).
+export SERVER_NAME
+echo "==> Running on ${SERVER_NAME}"
+
+# ----------------------------------------------------------------------
+# Compute Caddy upstream names — local (this host) + peers (every other
+# host in APP_SERVERS). These values are sed-substituted into the Caddy
+# snippet below, giving each host's Caddy a multi-upstream reverse_proxy:
+# prefer local, failover to peer(s) if local is unhealthy.
+# ----------------------------------------------------------------------
+LOCAL_UPSTREAM="${PROJECT_REPO}-${SERVER_NAME}:8000"
+PEER_UPSTREAMS=""
+# APP_SERVERS is a comma-separated list (e.g. "rishi-1,rishi-2"). Split it.
+IFS=',' read -ra APP_SERVER_LIST <<< "${APP_SERVERS}"
+for peer in "${APP_SERVER_LIST[@]}"; do
+    # Skip self — a server doesn't need a peer-upstream pointing at itself.
+    [ "${peer}" = "${SERVER_NAME}" ] && continue
+    # Space-separated list; `reverse_proxy A B C` accepts N upstream tokens.
+    PEER_UPSTREAMS="${PEER_UPSTREAMS:+${PEER_UPSTREAMS} }${PROJECT_REPO}-${peer}:8000"
+done
+echo "    local upstream:  ${LOCAL_UPSTREAM}"
+echo "    peer  upstreams: ${PEER_UPSTREAMS:-(none — single-host cluster)}"
 
 # The file where we record the last KNOWN GOOD image tag (written only on success)
 LAST_GOOD_FILE="${APP_DIR}/.last_good_image_tag"
@@ -227,10 +283,23 @@ if [ "${HEALTHY}" = "1" ]; then
     # a half-written config if Caddy reloads mid-write)
     SNIPPET_TMP="${SNIPPET_DEST}.tmp"
     # "sed -e 's|old|new|g'" replaces placeholders in the template with real values.
-    # The template has ${PROJECT_DOMAIN} and ${PROJECT_REPO} placeholders.
+    # Placeholders: ${PROJECT_DOMAIN}, ${PROJECT_REPO}, ${LOCAL_UPSTREAM}, ${PEER_UPSTREAMS}.
+    # LOCAL/PEER are derived above from APP_SERVERS + this host's SERVER_NAME.
     sed -e "s|\${PROJECT_DOMAIN}|${PROJECT_DOMAIN}|g" \
         -e "s|\${PROJECT_REPO}|${PROJECT_REPO}|g" \
+        -e "s|\${LOCAL_UPSTREAM}|${LOCAL_UPSTREAM}|g" \
+        -e "s|\${PEER_UPSTREAMS}|${PEER_UPSTREAMS}|g" \
         caddy/snippet.caddy.template > "${SNIPPET_TMP}"
+
+    # Ensure the long-running `caddy` container is attached to this project's
+    # Swarm overlay network. Without this, Caddy can't resolve peer aliases
+    # (e.g. yral-chat-ai-rishi-2) over the overlay, so the multi-upstream
+    # reverse_proxy would fall back to an unhealthy-peer state immediately.
+    # Idempotent: if already attached, the grep short-circuits.
+    if ! docker network inspect "${OVERLAY_NETWORK}" --format '{{range .Containers}}{{.Name}} {{end}}' 2>/dev/null | tr ' ' '\n' | grep -qx caddy; then
+        echo "    attaching caddy container to overlay ${OVERLAY_NETWORK}"
+        docker network connect "${OVERLAY_NETWORK}" caddy
+    fi
 
     # Validate that the EXISTING Caddy config is valid BEFORE we swap in the new snippet.
     # If Caddy's config was already broken, we don't want to add our snippet and

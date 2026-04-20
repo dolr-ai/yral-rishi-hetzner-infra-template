@@ -49,9 +49,26 @@ services:
           cpus: '1.0'
     expose:
       - "8000"
+    # The app joins TWO networks:
+    #   - web         : local bridge on THIS server. Caddy on the same host
+    #                   reaches the app via this bridge using the container
+    #                   name (${PROJECT_REPO}).
+    #   - db-internal : Swarm OVERLAY network spanning rishi-1 + rishi-2 (+
+    #                   rishi-3 for DB only). Originally existed so the app
+    #                   could reach HAProxy/Patroni. Now ALSO used by Caddy on
+    #                   each host to reach the PEER host's app container when
+    #                   the local one is unhealthy (multi-upstream failover).
+    #
+    # The per-host alias `${PROJECT_REPO}-${SERVER_NAME}` is what makes that
+    # peer-reach work: each host's container gets a globally unique alias on
+    # the overlay (e.g. `yral-chat-ai-rishi-1` vs `yral-chat-ai-rishi-2`) so
+    # Caddy can name the exact peer it wants, instead of round-robining the
+    # unqualified service name. SERVER_NAME is exported by deploy-app.sh.
     networks:
-      - web
-      - db-internal
+      web:
+      db-internal:
+        aliases:
+          - ${PROJECT_REPO}-${SERVER_NAME}
     environment:
       # SENTRY_DSN is not a critical secret (it only allows sending events,
       # not reading them) so an env var is acceptable.

@@ -440,7 +440,7 @@ jobs:
           key: ${{ secrets.HETZNER_BARE_METAL_GITHUB_ACTIONS_SSH_PRIVATE_KEY }}
           # Copy: docker-compose file, Caddy config template, deploy script,
           # migration script, SQL migration files, and project config
-          source: "docker-compose.yml,caddy/snippet.caddy.template,scripts/ci/deploy-app.sh,scripts/ci/run-migrations.sh,migrations,project.config"
+          source: "docker-compose.yml,caddy/snippet.caddy.template,scripts/ci/deploy-app.sh,scripts/ci/run-migrations.sh,migrations,project.config,servers.config"
           # Destination directory on the server
           target: /home/deploy/${{ env.PROJECT_REPO }}
 
@@ -488,7 +488,7 @@ jobs:
           host: ${{ env.SERVER_2_IP }}
           username: ${{ env.DEPLOY_USER }}
           key: ${{ secrets.HETZNER_BARE_METAL_GITHUB_ACTIONS_SSH_PRIVATE_KEY }}
-          source: "docker-compose.yml,caddy/snippet.caddy.template,scripts/ci/deploy-app.sh,scripts/ci/run-migrations.sh,migrations,project.config"
+          source: "docker-compose.yml,caddy/snippet.caddy.template,scripts/ci/deploy-app.sh,scripts/ci/run-migrations.sh,migrations,project.config,servers.config"
           target: /home/deploy/${{ env.PROJECT_REPO }}
 
       # Deploy to rishi-2 (same process as rishi-1).

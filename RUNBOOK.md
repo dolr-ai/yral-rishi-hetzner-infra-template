@@ -465,6 +465,124 @@ leader but has been demoted to a read-only replica (failover happened).
 
 ---
 
+## 9. Single App Origin Dead (App Container Down on One Host Only)
+
+**Symptoms:** Users report intermittent 502 Bad Gateway from `https://${PROJECT_DOMAIN}/`,
+but the aggregate Uptime Kuma monitor stays green. Latency looks normal.
+`curl -I https://${PROJECT_DOMAIN}/health` through Cloudflare sometimes
+returns 200, sometimes 502. Looks like a flaky service; is actually one
+dead origin.
+
+**Cause:** The app container died on ONE host (e.g. rishi-1) while
+Caddy on that host is still running. Before the multi-upstream failover
+fix (2026-04-20), Caddy on that host would return 502 for every request,
+and Cloudflare would pass those 502s straight to users. With the fix in
+place, Caddy instead transparently forwards to the peer host's app — so
+this symptom typically means failover isn't working (misconfigured
+snippet, Caddy not attached to the overlay, or peer app ALSO down).
+
+### Steps
+
+1. **Check which host's app container is dead:**
+   ```bash
+   for HOST in 138.201.137.181 136.243.150.84; do
+       echo "=== ${HOST} ==="
+       ssh deploy@${HOST} "docker ps -f name=^${PROJECT_REPO}$ --format '{{.Names}}: {{.Status}}'"
+   done
+   ```
+   You're looking for one host showing nothing (or "Exited"), the other
+   "Up (healthy)".
+
+2. **Ask Caddy which upstreams it thinks are healthy:**
+   ```bash
+   ssh deploy@138.201.137.181 \
+     "docker exec caddy wget -qO- http://localhost:2019/reverse_proxy/upstreams"
+   ```
+   Returns JSON with each upstream's `address` and `num_requests` /
+   `fails`. The dead host's upstream should show `fails > 0` and recent
+   traffic should be concentrated on the peer.
+
+3. **Verify Caddy is attached to the project's overlay** (required for
+   cross-host failover):
+   ```bash
+   source ./project.config
+   ssh deploy@138.201.137.181 \
+     "docker network inspect ${OVERLAY_NETWORK} --format '{{range .Containers}}{{.Name}} {{end}}'"
+   ```
+   `caddy` MUST appear in the output. If not, `deploy-app.sh` will attach
+   it on the next deploy — or attach manually:
+   ```bash
+   ssh deploy@138.201.137.181 "docker network connect ${OVERLAY_NETWORK} caddy"
+   ```
+   Then reload Caddy so it re-resolves upstream names:
+   ```bash
+   ssh deploy@138.201.137.181 \
+     "docker exec caddy caddy reload --config /etc/caddy/Caddyfile --force"
+   ```
+
+4. **Verify Caddy can actually reach the peer's app alias:**
+   ```bash
+   ssh deploy@138.201.137.181 \
+     "docker exec caddy wget -qO- http://${PROJECT_REPO}-rishi-2:8000/health"
+   ```
+   Expected: `{"status":"ok"}` (or equivalent). If DNS fails, the peer
+   container isn't attached to the overlay with its host-specific alias —
+   redeploy that host so `docker-compose.yml`'s `aliases:` clause runs.
+
+5. **Restart the dead app container** once failover is confirmed working:
+   ```bash
+   ssh deploy@<dead-host-ip> "docker start ${PROJECT_REPO}"
+   ssh deploy@<dead-host-ip> \
+     "docker inspect ${PROJECT_REPO} --format '{{.State.Health.Status}}'"
+   ```
+   Wait until `healthy`. Caddy's active probe will put it back in
+   rotation automatically within ~4s.
+
+### Prevention — per-origin Uptime Kuma monitors
+
+The failure mode above is silent by default because the aggregate monitor
+probes `https://${PROJECT_DOMAIN}/health` through Cloudflare, which
+round-robins across origins — one dead origin + one healthy origin
+averages to "mostly up" and never alerts. Fix: add **two extra Kuma
+monitors per service**, one per origin IP, both bypassing Cloudflare.
+
+1. In Uptime Kuma, create a new HTTP(s) monitor:
+   - **URL:** `https://${PROJECT_DOMAIN}/health`
+   - **Expand "Advanced" → Resolve Override:**
+     `${PROJECT_DOMAIN}:443:138.201.137.181` (rishi-1)
+   - Name it `${PROJECT_DOMAIN} — rishi-1 origin`.
+
+2. Clone it, change the Resolve Override to `...:136.243.150.84`
+   (rishi-2), name it `${PROJECT_DOMAIN} — rishi-2 origin`.
+
+3. Keep the existing aggregate monitor — the per-origin monitors add
+   signal without reducing it.
+
+When a single origin dies, the matching per-origin monitor goes red
+within 60s even though the aggregate stays green.
+
+### Why not just rely on Cloudflare?
+
+Plain Cloudflare proxy (non-paid tier) does NOT health-check origins
+and does NOT retry 5xx onto the peer origin. A 502 from one origin is
+returned to the client. This is why Caddy on each host owns the
+failover: it's the closest layer to the app that knows about both
+replicas.
+
+### Reference: incident on 2026-04-19
+
+rishi-1 auto-rebooted for a kernel upgrade; the `yral-chat-ai` app
+container didn't come back (Docker `restart: always` edge case — clean
+SIGTERM just before host shutdown is treated as "intentionally stopped"
+and skipped on boot). Caddy on rishi-1 stayed up and 502'd every
+request Cloudflare sent it. ~50% of user traffic got errors for 27
+hours. No alert fired because the aggregate Kuma monitor averaged
+rishi-1 and rishi-2 success rates and stayed green. See commit
+history for the fix: multi-upstream `reverse_proxy` +
+per-origin Kuma monitors.
+
+---
+
 ## General Debugging Commands
 
 ```bash

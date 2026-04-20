@@ -1,12 +1,12 @@
 #!/bin/bash
-# Run all 4 integration tests in order. MANUAL ONLY — these need SSH access
+# Run all 5 integration tests in order. MANUAL ONLY — these need SSH access
 # to the live Hetzner cluster and may temporarily disrupt traffic.
 #
 # Usage:
 #   bash tests/integration/run_all.sh                          # against the current repo's PROJECT_DOMAIN
 #   bash tests/integration/run_all.sh some.other.domain.com    # override the domain
 #
-# Exit code: 0 if all 4 pass, 1 otherwise.
+# Exit code: 0 if all 5 pass, 1 otherwise.
 
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -28,6 +28,7 @@ TESTS=(
     test_02_server_and_leader_failover.sh
     test_03_project_isolation.sh
     test_04_image_parity.sh
+    test_05_app_container_failover.sh
 )
 
 PASS=0; FAIL=0; FAILED_TESTS=""
