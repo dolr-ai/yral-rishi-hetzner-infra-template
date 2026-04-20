@@ -102,6 +102,27 @@ fi
 # Make IMAGE_TAG available as an env var for the stack files
 export IMAGE_TAG="${IMAGE_TAG}"
 
+# ----- Compute content sha for haproxy.cfg (unblocks CI after content drift) -----
+# Docker Swarm configs are IMMUTABLE; only labels can be updated. If the
+# haproxy.cfg file changes content, the next `docker stack deploy` fails with:
+#   "failed to update config <stack>_haproxy_cfg:
+#    rpc error: InvalidArgument: only updates to Labels are allowed"
+# This exact error broke template deploys from 2026-04-12 through 2026-04-20.
+#
+# Fix: version the Swarm config name by a content sha so every content change
+# creates a NEW config. haproxy/stack.yml references `${HAPROXY_CFG_SHA}`;
+# the old config is orphaned (no one references it) and we prune it below.
+#
+# Truncating to 8 chars keeps the combined config name within Swarm's 63-char
+# limit even at the template's maximum PROJECT_NAME of 39 chars:
+#   <SWARM_STACK>_haproxy_cfg_<sha8>
+#   = (PROJECT_NAME + "-db") + "_" + "haproxy_cfg" + "_" + 8
+#   = 42 + 1 + 11 + 1 + 8 = 63 ✓
+# 8 hex chars = 2^32 name space; collision risk across realistic revisions is
+# negligible and Swarm `docker config rm` refuses if in use anyway.
+export HAPROXY_CFG_SHA=$(sha256sum ./haproxy.cfg | head -c 8)
+echo "==> haproxy.cfg sha (for versioned Swarm config name): ${HAPROXY_CFG_SHA}"
+
 # ----- PRE-FLIGHT: Check cluster health before deploying -----
 # The rolling update strategy (stop-first, 1 at a time) temporarily takes a
 # node offline. If the cluster is already degraded (e.g., replicas in "start
@@ -158,6 +179,30 @@ echo ""
 echo "Stack deployed. Service status:"
 # Show all services in the stack with their replica counts
 docker stack services "${SWARM_STACK}"
+
+# ----- Prune old versioned haproxy_cfg configs -----
+# After the service rollout completes, the previous-version config is
+# orphaned (no service references it). Remove any ${SWARM_STACK}_haproxy_cfg*
+# whose name isn't the current sha.
+#
+# Also catches the LEGACY unversioned `${SWARM_STACK}_haproxy_cfg` name
+# (from before this fix) — that config is now orphaned and safe to prune.
+#
+# `docker config rm` refuses to remove a config still in use by any service,
+# so this is safe: we can't accidentally break a running service.
+echo ""
+echo "==> Pruning orphaned haproxy_cfg configs (keeping ${HAPROXY_CFG_SHA})..."
+docker config ls --format '{{.Name}}' \
+    | grep -E "^${SWARM_STACK}_haproxy_cfg(_|$)" \
+    | grep -v "^${SWARM_STACK}_haproxy_cfg_${HAPROXY_CFG_SHA}$" \
+    | while read -r OLD_CFG; do
+        if docker config rm "${OLD_CFG}" >/dev/null 2>&1; then
+            echo "  removed ${OLD_CFG}"
+        else
+            echo "  skipped ${OLD_CFG} (still referenced by a service — will prune on next deploy)"
+        fi
+    done
+
 echo ""
 echo "==> Daily backups are handled by .github/workflows/backup.yml (3:00 AM UTC)."
 echo "    To trigger manually: gh workflow run backup.yml"

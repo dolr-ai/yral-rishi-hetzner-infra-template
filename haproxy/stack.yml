@@ -86,8 +86,26 @@ services:
 # CONFIGS section: defines files that Swarm distributes to containers.
 # Unlike volumes (which mount host directories), configs are managed by
 # Swarm and work across all nodes in the cluster.
+#
+# WHY THE `name:` FIELD INCLUDES A SHA?
+# Docker Swarm configs are IMMUTABLE — once created, only their labels can
+# be updated, not the file content. If we used the default config name
+# (`<stack>_haproxy_cfg`) and `haproxy.cfg` content ever drifted, the next
+# `docker stack deploy` would fail with:
+#   "failed to update config ...: only updates to Labels are allowed"
+# which is exactly what broke template CI from 2026-04-12 → 2026-04-20.
+#
+# By baking a content sha into the name, each `haproxy.cfg` content change
+# creates a NEW config (old one gets pruned by deploy-db-stack.sh after
+# the service rollout). The ${HAPROXY_CFG_SHA} variable is exported by
+# deploy-db-stack.sh right before `docker stack deploy` runs.
+#
+# The `${SWARM_STACK}_` prefix is explicit because once a `name:` is set,
+# Swarm does NOT auto-prefix with the stack name (unlike the default).
+# Keeping the prefix prevents collisions across services on the same Swarm.
 configs:
   haproxy_cfg:
+    name: ${SWARM_STACK}_haproxy_cfg_${HAPROXY_CFG_SHA}
     # The source file on the host (copied to the server by CI via SCP)
     file: ./haproxy.cfg
 
