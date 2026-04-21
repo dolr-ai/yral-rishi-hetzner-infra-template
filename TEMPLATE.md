@@ -25,7 +25,7 @@ The infrastructure layer is reusable as-is. Only the **app layer** (`app/`,
 | **Minimum-privilege rewind_user** | Patroni's pg_rewind user has only catalog read perms, NOT superuser | `patroni/post_init.sh` |
 | **CI scripts in files** | Deploy logic in `scripts/ci/*.sh`, not inline in workflow YAML — readable, testable | `scripts/ci/deploy-db-stack.sh`, `scripts/ci/deploy-app.sh` |
 | **Private DB network** | etcd + Patroni + HAProxy on `db-internal` Swarm overlay (not internet-accessible) | `patroni/stack.yml`, `etcd/stack.yml`, `haproxy/stack.yml` |
-| **Sentry error reporting** | App errors auto-reported to apm.yral.com | `app/main.py`, `requirements.txt` |
+| **Sentry error reporting** | App errors auto-reported to sentry.rishi.yral.com | `app/main.py`, `requirements.txt` |
 | **Idempotent bootstrap** | post_init.sh + init.sql can be re-run without breaking | `patroni/post_init.sh`, `patroni/init.sql` |
 
 ---
@@ -113,7 +113,7 @@ Get the keys from the Hetzner Object Storage console. If already set up,
 Sentry is opt-in. Pass `--sentry-dsn` to bootstrap, or set the secret manually later:
 
 ```bash
-gh secret set SENTRY_DSN -b 'https://...@apm.yral.com/...' --repo dolr-ai/yral-<name>
+gh secret set SENTRY_DSN -b 'https://...@sentry.rishi.yral.com/...' --repo dolr-ai/yral-<name>
 ```
 
 The `init_sentry()` helper in `infra/sentry.py` is a no-op when the env var is empty.
@@ -140,7 +140,20 @@ These are global to all dolr-ai services on rishi-1/rishi-2/rishi-3:
 - ✅ Node labels (`server=rishi-1/2/3`)
 - ✅ `db-internal` overlay network
 - ✅ `web` Docker network
-- ✅ Caddy running on rishi-1 and rishi-2
+- ✅ Caddy running on rishi-1 and rishi-2 as a standalone `docker run` container.
+  **Caveat — known architectural gap (see RUNBOOK "Caddy lost overlay attachment"):**
+  Caddy's attachment to per-service Swarm overlay networks (`<name>-db-internal`)
+  is a *runtime* property that does NOT persist across Caddy container restarts.
+  This template hides the gap by re-running `docker network connect` inside
+  `scripts/ci/deploy-app.sh` on every push-to-main deploy. Services that deploy
+  infrequently are at higher risk of 502s after a Caddy reboot until the deploy
+  script runs again — those should install their own cron @reboot (or systemd)
+  reconnect hook (see `yral-rishi-sentry/scripts/caddy-reconnect.sh` for a
+  working example). The permanent fix is migrating Caddy to a Swarm stack with
+  declarative `networks:` entries — tracked separately.
+- ✅ Self-hosted Sentry at https://sentry.rishi.yral.com (error tracking + APM).
+  Create a project per service at that URL and put the DSN into the repo's
+  `SENTRY_DSN` GitHub Secret — see `INTEGRATIONS.md`.
 - ✅ Swarm infrastructure ports (2377/7946/4789) open
 
 If you ever rebuild a server from scratch: `bash scripts/swarm-setup.sh`

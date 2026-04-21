@@ -196,7 +196,7 @@ WHY blocks, header blocks, 5 required docs per service).
 | `DATABASE_URL_SERVER_2` | Composed by `new-service.sh` |
 | `BACKUP_S3_ACCESS_KEY` | macOS Keychain → set by `new-service.sh` |
 | `BACKUP_S3_SECRET_KEY` | macOS Keychain → set by `new-service.sh` |
-| `SENTRY_DSN` (optional) | From apm.yral.com |
+| `SENTRY_DSN` (optional) | From sentry.rishi.yral.com (self-hosted, @gobazzinga.io SSO) |
 
 `new-service.sh` sets the first 7 automatically (SSH key from `~/.ssh/`,
 DB passwords generated, S3 creds from macOS Keychain). Only Sentry is manual.

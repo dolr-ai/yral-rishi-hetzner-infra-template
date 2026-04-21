@@ -1,10 +1,10 @@
 # ---------------------------------------------------------------------------
-# sentry.py — sets up error tracking via Sentry (apm.yral.com).
+# sentry.py — sets up error tracking via Sentry (sentry.rishi.yral.com).
 #
 # WHAT IS SENTRY?
 # Sentry is an error-tracking service. When your app crashes or throws
 # an exception, Sentry captures the error, the stack trace (which line
-# of code caused it), and sends it to a dashboard at apm.yral.com.
+# of code caused it), and sends it to a dashboard at sentry.rishi.yral.com.
 # You can see all errors across all servers in one place.
 #
 # HOW TO USE:
@@ -27,7 +27,7 @@ import os
 # see which server an error came from in the Sentry dashboard.
 import socket
 
-# The main Sentry SDK — this is what sends errors to apm.yral.com.
+# The main Sentry SDK — this is what sends errors to sentry.rishi.yral.com.
 import sentry_sdk
 
 # These "integrations" tell Sentry how to hook into specific frameworks:
@@ -61,7 +61,7 @@ def init_sentry() -> None:
 
     # Configure the Sentry SDK with all our settings.
     sentry_sdk.init(
-        # WHERE to send errors (the project-specific URL from apm.yral.com)
+        # WHERE to send errors (the project-specific URL from sentry.rishi.yral.com)
         dsn=dsn,
 
         # WHICH environment this is (e.g., "production", "staging", "local")

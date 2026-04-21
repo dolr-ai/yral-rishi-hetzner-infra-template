@@ -453,4 +453,36 @@ echo "   # When happy, push your changes — CI redeploys automatically."
 echo
 echo "   # Run integration tests on the new service:"
 echo "   bash tests/integration/run_all.sh ${PROJECT_DOMAIN}"
+echo
+# ---- Sentry error tracking setup (separate manual step) -----------------
+# infra/sentry.py + app/main.py already call init_sentry() on startup; they
+# just need a DSN to actually report events. Sentry self-hosted lives at
+# sentry.rishi.yral.com and is managed by yral-rishi-sentry (see its RUNBOOK
+# if you have a Sentry-side issue).
+echo -e "${Y} ⚙  Sentry error tracking is OFF until you set SENTRY_DSN${N}"
+echo "   1. Open https://sentry.rishi.yral.com/organizations/sentry/projects/new/"
+echo "   2. Platform: Python. Name: ${PROJECT_REPO}. Team: rishi-services."
+echo "   3. Copy the DSN from the 'Configure Python' page."
+echo "   4. gh secret set SENTRY_DSN -R dolr-ai/${PROJECT_REPO} (paste DSN when prompted)"
+echo "   5. Re-run the latest deploy workflow OR push any change — container env"
+echo "      picks up the new DSN and events start flowing to your project."
+echo
+# ---- Caddy overlay attachment caveat ------------------------------------
+# docker network connect is a RUNTIME property that does not persist across
+# Caddy container restarts. This template masks the problem by re-running
+# the connect in deploy-app.sh on every deploy; services that deploy rarely
+# (e.g. monthly) can lose overlay attachment on a reboot. See RUNBOOK.
+echo -e "${Y} ⚠  Caddy overlay attachment is runtime-only${N}"
+echo
+echo "   Every deploy via deploy-app.sh re-runs 'docker network connect"
+echo "   ${PROJECT_REPO}-db-internal caddy' on rishi-1 + rishi-2. Services that"
+echo "   push to main frequently are unaffected. If this service will deploy"
+echo "   infrequently, consider adding a cron @reboot reconnect hook on"
+echo "   rishi-1/rishi-2 like yral-rishi-sentry does in its"
+echo "   scripts/bootstrap-caddy-reconnect.sh + scripts/caddy-reconnect.sh."
+echo
+echo "   Recovery after a Caddy restart (any service): on the affected host,"
+echo "   'docker network connect ${PROJECT_REPO}-db-internal caddy'. No Caddy"
+echo "   reload needed."
+echo
 echo -e "${G}========================================================${N}"

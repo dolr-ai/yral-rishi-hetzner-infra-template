@@ -5,7 +5,7 @@ shared platform services. They're all linked from **dashboard.yral.com**.
 
 | Service | URL | Purpose | How to wire it |
 |---|---|---|---|
-| **Sentry** | apm.yral.com | Error tracking, traces, profiling | `infra.init_sentry()` + `SENTRY_DSN` secret |
+| **Sentry** | sentry.rishi.yral.com | Error tracking, traces, profiling | `infra.init_sentry()` + `SENTRY_DSN` secret |
 | **Vault** | vault.yral.com | Secret storage / rotation | `infra.get_secret()` + `VAULT_TOKEN` secret |
 | **Uptime Kuma** | uptime.yral.com | Service uptime + push monitors | `infra.push_uptime_kuma()` + `UPTIME_KUMA_PUSH_URL` env |
 | **Beszel** | (dashboard.yral.com) | Server-level CPU/RAM/disk monitoring | Agent already runs on rishi-1/2/3 — nothing to do in-app |
@@ -22,13 +22,13 @@ app = FastAPI()
 ```
 
 **GitHub Secrets:**
-- `SENTRY_DSN` — create a new project at apm.yral.com, copy the DSN.
+- `SENTRY_DSN` — create a new project at sentry.rishi.yral.com, copy the DSN.
 
 **Env vars set by CI** (already wired in `docker-compose.yml`):
 - `SENTRY_DSN`, `SENTRY_RELEASE` (= git SHA), `SENTRY_ENVIRONMENT=production`
 
 Verify after deploy: `curl https://your-service.rishi.yral.com/sentry-test`
-then check apm.yral.com — the event should appear within ~10s.
+then check sentry.rishi.yral.com — the event should appear within ~10s.
 
 ## 2. Vault
 
