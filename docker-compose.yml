@@ -77,6 +77,31 @@ services:
       # specific deploys. CI sets IMAGE_TAG=${{ github.sha }}.
       SENTRY_RELEASE: ${IMAGE_TAG:-unknown}
       SENTRY_ENVIRONMENT: production
+      # Sample-rate defaults chosen to avoid CPU pressure on the self-hosted
+      # Sentry (sentry.rishi.yral.com). Errors are ALWAYS 100 % — only
+      # transactions + profiles are sampled.
+      #
+      #   SENTRY_TRACES_RATE=0.5    — keep half of HTTP transactions. Still
+      #     plenty of samples for statistically-meaningful P50/P75/P95 at
+      #     any realistic service traffic. If a service needs higher
+      #     resolution (e.g., surfacing rare slow endpoints), bump for that
+      #     service only by overriding here in its own docker-compose.yml.
+      #
+      #   SENTRY_PROFILES_RATE=0.05 — keep 5 % of profiles. Profiling
+      #     (flame graphs) is expensive to ingest per event — profile
+      #     payloads are larger than transactions, and the
+      #     snuba-profiling-functions-consumer can burn ~1 core at
+      #     1.0 sampling with just 3 events/sec of traffic. 0.05 gives us
+      #     occasional snapshots for slow-path analysis without continuous
+      #     CPU load on the Sentry cluster.
+      #
+      # Both are overridable by setting the env var elsewhere (e.g., in a
+      # service-specific docker-compose.override.yml or via GitHub Secrets +
+      # CI injection) without touching this file. infra/sentry.py reads
+      # os.environ.get("SENTRY_TRACES_RATE", "1.0") so absence defaults back
+      # to 1.0 — the values here override that default.
+      SENTRY_TRACES_RATE: "0.5"
+      SENTRY_PROFILES_RATE: "0.05"
       # Exposed so app code can self-identify (e.g., the /sentry-test endpoint).
       PROJECT_REPO: ${PROJECT_REPO}
     secrets:
