@@ -100,7 +100,12 @@ services:
       # CI injection) without touching this file. infra/sentry.py reads
       # os.environ.get("SENTRY_TRACES_RATE", "1.0") so absence defaults back
       # to 1.0 — the values here override that default.
-      SENTRY_TRACES_RATE: "0.5"
+      #
+      # 2026-04-22 update: TRACES_RATE bumped back 0.5 → 1.0 after the
+      # CPU-pressure fix campaign (profiles 0.05, Clickhouse mem 16 GB,
+      # health-check inbound filter, 30-day retention) settled. PROFILES
+      # stays at 0.05 — that was the single biggest CPU win.
+      SENTRY_TRACES_RATE: "1.0"
       SENTRY_PROFILES_RATE: "0.05"
       # Exposed so app code can self-identify (e.g., the /sentry-test endpoint).
       PROJECT_REPO: ${PROJECT_REPO}
