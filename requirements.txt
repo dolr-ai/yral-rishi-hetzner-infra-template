@@ -11,7 +11,7 @@
 
 # FastAPI — the web framework. Handles HTTP requests, routes URLs to
 # Python functions, converts Python dicts to JSON responses.
-fastapi==0.115.12
+fastapi==0.136.0
 
 # Uvicorn — the web server that RUNS FastAPI. Listens on port 8000
 # and feeds incoming HTTP requests to FastAPI.
