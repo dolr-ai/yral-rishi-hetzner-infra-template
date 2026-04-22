@@ -18,4 +18,4 @@ pytest>=8.0
 # httpx — an HTTP client library. FastAPI's TestClient uses it internally
 # to simulate HTTP requests to the app during unit tests (without needing
 # a real web server running).
-httpx>=0.27
+httpx>=0.28.1
