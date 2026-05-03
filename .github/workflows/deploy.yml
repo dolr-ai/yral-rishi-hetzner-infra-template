@@ -194,7 +194,7 @@ jobs:
 
       # Build the app's Docker image and push it to GHCR.
       - name: Build and push app image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           # Build context = repo root (where the Dockerfile is)
           context: .
@@ -240,7 +240,7 @@ jobs:
       - name: Build and push backup image
         # Skip this step for stateless services (no database = no backups needed)
         if: needs.config.outputs.with_database == 'true'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           # Build context = the backup/ subdirectory (where backup/Dockerfile is)
           context: ./backup
@@ -254,7 +254,7 @@ jobs:
       # This image contains PostgreSQL + Patroni + our bootstrap scripts.
       - name: Build and push Patroni image
         if: needs.config.outputs.with_database == 'true'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           # Context is the repo ROOT (not ./patroni) because the Dockerfile
           # needs to COPY both patroni/* files AND the migrations/ directory.
