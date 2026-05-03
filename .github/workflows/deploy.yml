@@ -307,7 +307,7 @@ jobs:
       # Copy the stack files and deploy script to rishi-1 (the Swarm manager).
       # SCP = Secure Copy Protocol (like cp but over SSH to a remote server).
       - name: Copy stack files + project.config + CI script to Swarm manager (rishi-1)
-        uses: appleboy/scp-action@v0.1.7
+        uses: appleboy/scp-action@v1.0.0
         with:
           # Destination server
           host: ${{ env.SERVER_1_IP }}
@@ -433,7 +433,7 @@ jobs:
 
       # Copy app files to rishi-1 via SCP (Secure Copy over SSH)
       - name: Copy app files to Server 1
-        uses: appleboy/scp-action@v0.1.7
+        uses: appleboy/scp-action@v1.0.0
         with:
           host: ${{ env.SERVER_1_IP }}
           username: ${{ env.DEPLOY_USER }}
@@ -483,7 +483,7 @@ jobs:
 
       # Copy app files to rishi-2 (same files as rishi-1)
       - name: Copy app files to Server 2
-        uses: appleboy/scp-action@v0.1.7
+        uses: appleboy/scp-action@v1.0.0
         with:
           host: ${{ env.SERVER_2_IP }}
           username: ${{ env.DEPLOY_USER }}
@@ -529,7 +529,7 @@ jobs:
       # ensures the Caddy snippet template + render helper land alongside
       # update-caddy-snippet.sh.
       - name: Copy Caddy files to Server 3
-        uses: appleboy/scp-action@v0.1.7
+        uses: appleboy/scp-action@v1.0.0
         with:
           host: ${{ env.SERVER_3_IP }}
           username: ${{ env.DEPLOY_USER }}
