@@ -295,11 +295,43 @@ if [ "${HEALTHY}" = "1" ]; then
     # Swarm overlay network. Without this, Caddy can't resolve peer aliases
     # (e.g. yral-chat-ai-rishi-2) over the overlay, so the multi-upstream
     # reverse_proxy would fall back to an unhealthy-peer state immediately.
-    # Idempotent: if already attached, the grep short-circuits.
-    if ! docker network inspect "${OVERLAY_NETWORK}" --format '{{range .Containers}}{{.Name}} {{end}}' 2>/dev/null | tr ' ' '\n' | grep -qx caddy; then
-        echo "    attaching caddy container to overlay ${OVERLAY_NETWORK}"
-        docker network connect "${OVERLAY_NETWORK}" caddy
+    #
+    # PERSISTENCE PATTERN (since 2026-05-03 incident):
+    # The overlay name is recorded in /home/deploy/caddy/.overlays-list and
+    # the Caddy compose file is regenerated to declare every overlay as
+    # `external: true`. This survives Caddy container restarts (compose
+    # recreate, host reboot, kernel update) — unlike the legacy
+    # `docker network connect` approach which was lost on every restart
+    # and caused the 2026-05-03 chat-ai 521 incident.
+    #
+    # Install (or refresh) the render helper next to the Caddy install so
+    # it's always available for the persistence step below.
+    install -m 0755 "${APP_DIR}/caddy/render-caddy-compose.sh" /home/deploy/caddy/render-caddy-compose.sh
+
+    OVERLAYS_FILE="/home/deploy/caddy/.overlays-list"
+    if [ ! -f "${OVERLAYS_FILE}" ]; then
+        # First-run bootstrap on a server that had Caddy set up before this
+        # persistence pattern existed: capture current Caddy network
+        # attachments (excluding the local `web` bridge which is tracked
+        # separately) so they survive the upcoming compose regeneration.
+        docker inspect caddy --format '{{range $n, $_ := .NetworkSettings.Networks}}{{$n}}{{"\n"}}{{end}}' 2>/dev/null \
+            | grep -v '^web$' | grep -v '^$' \
+            > "${OVERLAYS_FILE}"
+        echo "    initialized ${OVERLAYS_FILE} from current Caddy attachments:"
+        sed 's/^/      /' "${OVERLAYS_FILE}"
     fi
+
+    # Append this project's overlay (idempotent — only adds if not present).
+    if ! grep -qxF "${OVERLAY_NETWORK}" "${OVERLAYS_FILE}"; then
+        echo "${OVERLAY_NETWORK}" >> "${OVERLAYS_FILE}"
+        echo "    added ${OVERLAY_NETWORK} to ${OVERLAYS_FILE}"
+    fi
+
+    # Regenerate the Caddy compose file from the overlay list and run
+    # `docker compose up -d`. The render script is idempotent: if no new
+    # overlay was added, the rendered compose is identical to the existing
+    # one and Caddy is NOT recreated.
+    /home/deploy/caddy/render-caddy-compose.sh
 
     # Validate that the EXISTING Caddy config is valid BEFORE we swap in the new snippet.
     # If Caddy's config was already broken, we don't want to add our snippet and
