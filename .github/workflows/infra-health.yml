@@ -107,7 +107,7 @@ jobs:
         id: patroni
         continue-on-error: true
         # SSH into rishi-1 (the Swarm manager) and inspect the Patroni cluster
-        uses: appleboy/ssh-action@v1.2.0
+        uses: appleboy/ssh-action@v1.2.5
         with:
           # Connect to Server 1's IP address
           host: ${{ env.SERVER_1_IP }}
@@ -169,7 +169,7 @@ jobs:
         id: etcd
         continue-on-error: true
         # SSH into rishi-1 to inspect etcd
-        uses: appleboy/ssh-action@v1.2.0
+        uses: appleboy/ssh-action@v1.2.5
         with:
           host: ${{ env.SERVER_1_IP }}
           username: ${{ env.DEPLOY_USER }}
@@ -213,7 +213,7 @@ jobs:
         if: env.WITH_DATABASE != 'false' && steps.patroni.outcome == 'failure'
         id: reinit
         continue-on-error: true
-        uses: appleboy/ssh-action@v1.2.0
+        uses: appleboy/ssh-action@v1.2.5
         with:
           host: ${{ env.SERVER_1_IP }}
           username: ${{ env.DEPLOY_USER }}

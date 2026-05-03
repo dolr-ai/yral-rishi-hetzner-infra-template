@@ -322,7 +322,7 @@ jobs:
 
       # Pre-pull the Patroni image on Server 1 (log in to GHCR first)
       - name: Pre-pull Patroni image on Server 1
-        uses: appleboy/ssh-action@v1.2.0
+        uses: appleboy/ssh-action@v1.2.5
         with:
           host: ${{ env.SERVER_1_IP }}
           username: ${{ env.DEPLOY_USER }}
@@ -335,7 +335,7 @@ jobs:
 
       # Pre-pull the Patroni image on Server 2 (same process)
       - name: Pre-pull Patroni image on Server 2
-        uses: appleboy/ssh-action@v1.2.0
+        uses: appleboy/ssh-action@v1.2.5
         with:
           host: ${{ env.SERVER_2_IP }}
           username: ${{ env.DEPLOY_USER }}
@@ -346,7 +346,7 @@ jobs:
 
       # Pre-pull the Patroni image on Server 3 (same process)
       - name: Pre-pull Patroni image on Server 3
-        uses: appleboy/ssh-action@v1.2.0
+        uses: appleboy/ssh-action@v1.2.5
         with:
           host: ${{ env.SERVER_3_IP }}
           username: ${{ env.DEPLOY_USER }}
@@ -359,7 +359,7 @@ jobs:
       # The deploy-db-stack.sh script handles: creating secrets, merging
       # all 3 stack files, and running `docker stack deploy`.
       - name: Deploy stack via Swarm manager
-        uses: appleboy/ssh-action@v1.2.0
+        uses: appleboy/ssh-action@v1.2.5
         with:
           host: ${{ env.SERVER_1_IP }}
           username: ${{ env.DEPLOY_USER }}
@@ -452,7 +452,7 @@ jobs:
       #   5. On success: records the tag as "last known good", updates Caddy
       #   6. On failure: rolls back to the previous image, exits with error
       - name: Deploy + verify + auto-rollback on Server 1 (canary)
-        uses: appleboy/ssh-action@v1.2.0
+        uses: appleboy/ssh-action@v1.2.5
         with:
           host: ${{ env.SERVER_1_IP }}
           username: ${{ env.DEPLOY_USER }}
@@ -495,7 +495,7 @@ jobs:
       # This step ONLY runs if the rishi-1 deploy succeeded.
       # If rishi-1 failed, the pipeline already stopped above.
       - name: Deploy + verify + auto-rollback on Server 2
-        uses: appleboy/ssh-action@v1.2.0
+        uses: appleboy/ssh-action@v1.2.5
         with:
           host: ${{ env.SERVER_2_IP }}
           username: ${{ env.DEPLOY_USER }}
@@ -542,7 +542,7 @@ jobs:
       # validates Caddy, and reloads. It refuses to run on APP_SERVERS as
       # a safety check.
       - name: Update Caddy snippet on Server 3 (no app deploy)
-        uses: appleboy/ssh-action@v1.2.0
+        uses: appleboy/ssh-action@v1.2.5
         with:
           host: ${{ env.SERVER_3_IP }}
           username: ${{ env.DEPLOY_USER }}

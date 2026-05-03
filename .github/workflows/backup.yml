@@ -70,7 +70,7 @@ jobs:
 
         # appleboy/ssh-action: a GitHub Action that SSHes into a server
         # and runs a script. It handles SSH key authentication automatically.
-        uses: appleboy/ssh-action@v1.2.0
+        uses: appleboy/ssh-action@v1.2.5
         with:
           # Connect to rishi-1 (the Swarm manager)
           host: ${{ env.SERVER_1_IP }}

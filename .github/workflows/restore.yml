@@ -60,7 +60,7 @@ jobs:
 
       - name: Restore database on rishi-1
         if: env.WITH_DATABASE != 'false'
-        uses: appleboy/ssh-action@v1.2.0
+        uses: appleboy/ssh-action@v1.2.5
         with:
           host: ${{ env.SERVER_1_IP }}
           username: ${{ env.DEPLOY_USER }}
@@ -146,7 +146,7 @@ jobs:
       # Re-run migrations (backup might predate a migration)
       - name: Re-run migrations
         if: env.WITH_DATABASE != 'false'
-        uses: appleboy/ssh-action@v1.2.0
+        uses: appleboy/ssh-action@v1.2.5
         with:
           host: ${{ env.SERVER_1_IP }}
           username: ${{ env.DEPLOY_USER }}
@@ -159,7 +159,7 @@ jobs:
       # Restart app containers on both servers
       - name: Restart app containers
         if: env.WITH_DATABASE != 'false'
-        uses: appleboy/ssh-action@v1.2.0
+        uses: appleboy/ssh-action@v1.2.5
         with:
           host: ${{ env.SERVER_1_IP }},${{ env.SERVER_2_IP }}
           username: ${{ env.DEPLOY_USER }}
