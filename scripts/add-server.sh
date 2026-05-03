@@ -206,6 +206,52 @@ REMOTE
 
 echo ""
 
+# ----- Step 1.5: Bootstrap Caddy on the new server -----
+# Until 2026-05-03 this step did not exist and Caddy had to be installed
+# manually after add-server.sh ran. The 2026-05-03 incident showed the
+# cost of that manual step being skipped: rishi-3 was in the Cloudflare
+# wildcard but had no Caddy → ~33% of CF probes silently dropped → 521s.
+#
+# What this step does:
+#   - Copies caddy/render-caddy-compose.sh to the new server.
+#   - Writes /home/deploy/caddy/Caddyfile (the master config that imports
+#     every per-project snippet from conf.d/).
+#   - Initializes an empty /home/deploy/caddy/.overlays-list. As services
+#     deploy via deploy-app.sh / update-caddy-snippet.sh, they append
+#     their overlay name and re-render the compose (idempotent).
+#   - Runs render-caddy-compose.sh to generate docker-compose.yml and
+#     bring Caddy up. Caddy starts with no per-project snippets and the
+#     `web` bridge only — services add themselves on first deploy.
+#
+# After this step, the new server is reachable on :443 (with self-signed
+# cert until a snippet is deployed for it). Add the server to CADDY_HOSTS
+# (and APP_SERVERS if it should run app containers) so future CI deploys
+# push snippets to it automatically.
+echo "==> 1.5/4 Bootstrapping Caddy on ${IP}..."
+
+# SCP the render helper into the new server's caddy directory.
+scp -i "${SSH_KEY_PATH/#\~/$HOME}" -o StrictHostKeyChecking=accept-new \
+    "${REPO_ROOT}/caddy/render-caddy-compose.sh" \
+    deploy@"${IP}":/home/deploy/caddy/render-caddy-compose.sh
+
+# SSH as deploy + write Caddyfile + chmod render helper + render initial
+# compose + bring Caddy up. Single heredoc for atomicity.
+ssh -i "${SSH_KEY_PATH/#\~/$HOME}" deploy@"${IP}" bash <<'BOOTSTRAP'
+set -e
+chmod 755 /home/deploy/caddy/render-caddy-compose.sh
+cat > /home/deploy/caddy/Caddyfile <<'CADDYFILE'
+# Imports every per-project snippet. Each project drops its snippet into
+# /home/deploy/caddy/conf.d/<repo>.caddy via CI. Caddy reloads automatically
+# on change. Do NOT add per-project blocks here directly.
+import /etc/caddy/conf.d/*.caddy
+CADDYFILE
+touch /home/deploy/caddy/.overlays-list
+/home/deploy/caddy/render-caddy-compose.sh
+BOOTSTRAP
+
+echo "    Caddy bootstrapped on ${NAME}"
+echo ""
+
 # ----- Step 2: Verify SSH works with the deploy user -----
 echo "==> 2/4 Verifying deploy SSH..."
 # Try to SSH as the deploy user using the CI private key.

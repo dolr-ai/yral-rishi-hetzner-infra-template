@@ -440,7 +440,7 @@ jobs:
           key: ${{ secrets.HETZNER_BARE_METAL_GITHUB_ACTIONS_SSH_PRIVATE_KEY }}
           # Copy: docker-compose file, Caddy config template, deploy script,
           # migration script, SQL migration files, and project config
-          source: "docker-compose.yml,caddy/snippet.caddy.template,scripts/ci/deploy-app.sh,scripts/ci/run-migrations.sh,migrations,project.config,servers.config"
+          source: "docker-compose.yml,caddy/snippet.caddy.template,caddy/render-caddy-compose.sh,scripts/ci/deploy-app.sh,scripts/ci/update-caddy-snippet.sh,scripts/ci/run-migrations.sh,migrations,project.config,servers.config"
           # Destination directory on the server
           target: /home/deploy/${{ env.PROJECT_REPO }}
 
@@ -488,7 +488,7 @@ jobs:
           host: ${{ env.SERVER_2_IP }}
           username: ${{ env.DEPLOY_USER }}
           key: ${{ secrets.HETZNER_BARE_METAL_GITHUB_ACTIONS_SSH_PRIVATE_KEY }}
-          source: "docker-compose.yml,caddy/snippet.caddy.template,scripts/ci/deploy-app.sh,scripts/ci/run-migrations.sh,migrations,project.config,servers.config"
+          source: "docker-compose.yml,caddy/snippet.caddy.template,caddy/render-caddy-compose.sh,scripts/ci/deploy-app.sh,scripts/ci/update-caddy-snippet.sh,scripts/ci/run-migrations.sh,migrations,project.config,servers.config"
           target: /home/deploy/${{ env.PROJECT_REPO }}
 
       # Deploy to rishi-2 (same process as rishi-1).
@@ -512,4 +512,45 @@ jobs:
           SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_ACTOR: ${{ github.actor }}
+          APP_DIR: /home/deploy/${{ env.PROJECT_REPO }}
+
+      # ---------- SERVER 3 (Caddy snippet only — no app container here) ----------
+      #
+      # rishi-3 is in the Cloudflare wildcard `*.rishi` DNS record but does
+      # NOT run app containers (its role is DB + self-hosted Sentry). So we
+      # ship the Caddy snippet to it so users hitting rishi-3:443 are served
+      # via overlay-network proxy to the app upstreams on rishi-1/rishi-2.
+      #
+      # Until 2026-05-03 this step did not exist and rishi-3 had no Caddy
+      # at all → ~33% of CF probes silently dropped → 521s under load.
+
+      # Copy app files to rishi-3. Same source list as rishi-1/rishi-2 even
+      # though most files are unused here — keeps the workflow uniform and
+      # ensures the Caddy snippet template + render helper land alongside
+      # update-caddy-snippet.sh.
+      - name: Copy Caddy files to Server 3
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ env.SERVER_3_IP }}
+          username: ${{ env.DEPLOY_USER }}
+          key: ${{ secrets.HETZNER_BARE_METAL_GITHUB_ACTIONS_SSH_PRIVATE_KEY }}
+          source: "docker-compose.yml,caddy/snippet.caddy.template,caddy/render-caddy-compose.sh,scripts/ci/deploy-app.sh,scripts/ci/update-caddy-snippet.sh,scripts/ci/run-migrations.sh,migrations,project.config,servers.config"
+          target: /home/deploy/${{ env.PROJECT_REPO }}
+
+      # Run the Caddy-snippet-only updater on rishi-3. This script writes
+      # the snippet, persists the overlay attachment via .overlays-list,
+      # validates Caddy, and reloads. It refuses to run on APP_SERVERS as
+      # a safety check.
+      - name: Update Caddy snippet on Server 3 (no app deploy)
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ env.SERVER_3_IP }}
+          username: ${{ env.DEPLOY_USER }}
+          key: ${{ secrets.HETZNER_BARE_METAL_GITHUB_ACTIONS_SSH_PRIVATE_KEY }}
+          command_timeout: 2m
+          envs: APP_DIR
+          script: |
+            chmod +x ${APP_DIR}/scripts/ci/update-caddy-snippet.sh
+            ${APP_DIR}/scripts/ci/update-caddy-snippet.sh
+        env:
           APP_DIR: /home/deploy/${{ env.PROJECT_REPO }}

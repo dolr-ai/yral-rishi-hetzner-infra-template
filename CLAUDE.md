@@ -24,9 +24,9 @@ else (infra, CI, security, backups, migrations) is inherited from the template.
 
 ```
 Browser
-  ↓ Cloudflare wildcard *.rishi.yral.com (DNS round-robin to rishi-1 + rishi-2)
-Caddy (rishi-1 OR rishi-2, per-project snippet in /etc/caddy/conf.d/)
-  ↓ Docker "web" bridge network (local per server)
+  ↓ Cloudflare wildcard *.rishi.yral.com (DNS round-robin to ALL THREE servers)
+Caddy (rishi-1, rishi-2, rishi-3 — one snippet per project per host)
+  ↓ Docker "web" bridge (local app, rishi-1+rishi-2) OR Swarm overlay (rishi-3 → rishi-1/2)
 App (FastAPI, non-root appuser UID 1001, rishi-1 + rishi-2)
   ↓ Docker Swarm overlay network (per-project, private, encrypted)
 HAProxy (rishi-1 + rishi-2, routes to Patroni leader via /master health check)
@@ -36,15 +36,22 @@ PostgreSQL Primary (whichever of rishi-1/2/3 is current leader)
 PostgreSQL Standbys (the other 2 servers)
 ```
 
+Caddy persistence: every project's overlay network is recorded in
+`/home/deploy/caddy/.overlays-list` on each Caddy host. The Caddy compose
+file is regenerated from that list and declares each overlay as `external:
+true`, so attachments survive container restarts and host reboots. CI calls
+the regenerator `caddy/render-caddy-compose.sh` from `deploy-app.sh`
+(on APP_SERVERS) and `update-caddy-snippet.sh` (on Caddy-only hosts).
+
 ---
 
 ## Servers (from servers.config)
 
 | Name | IP | Role |
 |---|---|---|
-| rishi-1 | 138.201.137.181 | Swarm manager + App + DB |
-| rishi-2 | 136.243.150.84 | Swarm worker + App + DB |
-| rishi-3 | 136.243.147.225 | Swarm worker + DB only |
+| rishi-1 | 138.201.137.181 | Swarm manager + App + DB + Caddy |
+| rishi-2 | 136.243.150.84 | Swarm worker + App + DB + Caddy |
+| rishi-3 | 136.243.147.225 | Swarm worker + DB + self-hosted Sentry + Caddy (no app) |
 
 To add a new server: `bash scripts/add-server.sh --name rishi-4 --ip X.X.X.X`
 To migrate to new IPs: edit `servers.config`, re-run `scripts/swarm-setup.sh`.
@@ -79,10 +86,12 @@ push to main
       6. If UNHEALTHY → auto-rollback to .last_good_image_tag, exit 1
       7. If HEALTHY → record tag, update Caddy snippet
   → CI: deploy-app to rishi-2 (ONLY if rishi-1 fully succeeded)
+  → CI: update-caddy-snippet on rishi-3 (snippet only, no app deploy)
 ```
 
 A bad deploy fails on rishi-1, auto-rolls back, and rishi-2 stays on the
-old healthy image. Cloudflare DNS RR keeps serving via rishi-2.
+old healthy image. Cloudflare DNS RR keeps serving via rishi-2 + rishi-3
+(rishi-3's Caddy reverse-proxies to whichever of rishi-1/rishi-2 is healthy).
 
 ---
 
@@ -164,12 +173,14 @@ WHY blocks, header blocks, 5 required docs per service).
 | `haproxy/` | HAProxy config + Swarm stack (2 nodes) |
 | `backup/` | Backup image (alpine + pg_dump + mc) |
 | `caddy/snippet.caddy.template` | Per-project Caddy reverse proxy block |
+| `caddy/render-caddy-compose.sh` | Regenerator for /home/deploy/caddy/docker-compose.yml from .overlays-list (server-side, persistent overlay attachments) |
 | `local/` | Single-host dev stack (`bash local/setup.sh`) |
 | `scripts/new-service.sh` | One-command bootstrap for a new service |
 | `scripts/teardown-service.sh` | Full cleanup of a service from infra + GitHub |
 | `scripts/add-server.sh` | Provision a new Hetzner server into the cluster |
 | `scripts/swarm-setup.sh` | One-time Swarm cluster initialization |
-| `scripts/ci/deploy-app.sh` | Canary deploy with auto-rollback |
+| `scripts/ci/deploy-app.sh` | Canary deploy with auto-rollback (APP_SERVERS) |
+| `scripts/ci/update-caddy-snippet.sh` | Caddy snippet update for Caddy-only hosts (CADDY_HOSTS minus APP_SERVERS, e.g. rishi-3) |
 | `scripts/ci/deploy-db-stack.sh` | Swarm stack deploy (etcd + Patroni + HAProxy) |
 | `scripts/ci/run-migrations.sh` | Apply pending SQL migrations via HAProxy |
 | `scripts/restore-from-backup.sh` | Download + restore from S3 backup |
