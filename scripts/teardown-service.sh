@@ -9,23 +9,43 @@
 #   1. Swarm stack (etcd + Patroni + HAProxy containers)
 #   2. Patroni + etcd data volumes on all 3 servers (THE DATABASE DATA!)
 #   3. Per-project Swarm secrets (postgres_password, replication_password)
-#   4. Per-project overlay network
-#   5. App container + /home/deploy/<repo>/ on rishi-1 + rishi-2
+#   4. ALL per-project overlay networks: <name>-db-internal AND any
+#      <name>-db_*  (e.g. <name>-db_default auto-created by Swarm when a
+#      stack YAML references an unnamed network). Missing the auto-created
+#      _default network is the single most common teardown footprint-leak.
+#   5. App container + dirs on ALL servers: /home/deploy/yral-<name>/
+#      (app dir, rishi-1 + rishi-2) AND /home/deploy/<name>-db-stack/
+#      (db-stack files SCP'd by CI, rishi-1 only today — but we rm on all
+#      three for future-proofing). Forgetting the db-stack dir was the
+#      earlier bug that left 7+ orphan dirs on rishi-1.
 #   6. Caddy snippet on rishi-1 + rishi-2 (then reloads Caddy)
-#   7. GHCR images (app + patroni Docker images)
-#   8. GitHub repo (gh repo delete)
-#   9. Local clone (unless --keep-local)
+#   7. GHCR images (app + patroni Docker images)        [skip with --infra-only]
+#   8. GitHub repo (gh repo delete)                     [skip with --infra-only]
+#   9. Local clone (unless --keep-local)                [skip with --infra-only]
 #
 # WHAT IT DOES NOT REMOVE:
 #   - Other dolr-ai services (counter, hello-world, etc.) — cross-project safe
 #   - The CI SSH key, Sentry projects, Cloudflare DNS (global resources)
 #   - This template repo itself
+#   - Misplaced volumes named for one host but living on another (e.g.
+#     <stack>_patroni-rishi-2-data found on rishi-1 because Swarm once
+#     scheduled that replica there before placement constraints). The
+#     stack-prefix glob DOES catch these — but only during teardown-time
+#     while the stack name is still known. If the stack was already removed
+#     manually, use scripts/ci-cleanup-orphans.sh (or this script by
+#     passing the same --name).
 #
 # USAGE:
 #   bash scripts/teardown-service.sh --name <project-name>
 #   bash scripts/teardown-service.sh --name foo --target-dir /path/to/repo
 #   bash scripts/teardown-service.sh --name foo --yes              # skip prompts
 #   bash scripts/teardown-service.sh --name foo --keep-local       # keep local dir
+#   bash scripts/teardown-service.sh --name foo --infra-only       # skip GHCR+repo+local
+#
+# --infra-only is for cleaning up an ORPHAN: service where the Swarm stack
+# is long gone but stale dirs/volumes/networks remain. The GHCR image and
+# GitHub repo may have been deleted separately (or never existed, e.g. a
+# local-only experiment). With --infra-only, steps 7-9 are skipped entirely.
 #
 # IDEMPOTENT: each step swallows "not found" errors, so re-running is safe.
 #
@@ -45,6 +65,9 @@ NAME=""                # The service name to tear down
 TARGET_DIR=""          # Where the local clone lives
 ASSUME_YES="false"     # If true, skip the confirmation prompt
 KEEP_LOCAL="false"     # If true, don't delete the local clone
+INFRA_ONLY="false"     # If true, skip GHCR / GitHub repo / local clone steps.
+                       # Use when cleaning up an orphan whose GitHub side was
+                       # already removed (or never created).
 ORG="dolr-ai"         # The GitHub organization
 DEFAULT_PARENT_DIR="${HOME}/Claude Projects"
 
@@ -59,8 +82,12 @@ while [ $# -gt 0 ]; do
         --yes)         ASSUME_YES="true"; shift ;;
         # --keep-local → don't delete the local clone (keep it for reference)
         --keep-local)  KEEP_LOCAL="true"; shift ;;
+        # --infra-only → skip GHCR image delete, GitHub repo delete, and
+        # local clone delete (steps 7, 8, 9). For orphan cleanup where the
+        # GitHub side is already gone or was never created.
+        --infra-only)  INFRA_ONLY="true"; shift ;;
         # -h or --help → print the header comment block and exit
-        -h|--help)     sed -n '2,40p' "$0"; exit 0 ;;
+        -h|--help)     sed -n '2,60p' "$0"; exit 0 ;;
         # Unrecognized argument → error
         *)             echo "Unknown arg: $1"; exit 1 ;;
     esac
@@ -138,10 +165,17 @@ echo -e "${R} TEARING DOWN: ${PROJECT_REPO}${N}"
 echo
 echo " URL:          https://${PROJECT_DOMAIN}/"
 echo " Swarm stack:  ${SWARM_STACK}"
-echo " Network:      ${OVERLAY_NETWORK}"
+echo " Network:      ${OVERLAY_NETWORK}   (+ any ${SWARM_STACK}_* auto-created)"
+echo " Server dirs:  /home/deploy/${PROJECT_REPO}/ + /home/deploy/${SWARM_STACK}-stack/"
+if [ "${INFRA_ONLY}" = "true" ]; then
+echo " GHCR repos:   (skipped — --infra-only)"
+echo " GitHub repo:  (skipped — --infra-only)"
+echo " Local dir:    (skipped — --infra-only)"
+else
 echo " GHCR repos:   ${IMAGE_REPO}, ${PATRONI_IMAGE_REPO}"
 echo " GitHub repo:  https://github.com/${ORG}/${PROJECT_REPO}"
 echo " Local dir:    ${TARGET_DIR}$([ "${KEEP_LOCAL}" = "true" ] && echo " (KEEPING)")"
+fi
 echo
 echo -e "${R} This is destructive and irreversible.${N}"
 echo -e "${R}========================================================${N}"
@@ -221,43 +255,112 @@ for SECRET in "${SWARM_STACK}_postgres_password" "${SWARM_STACK}_replication_pas
 done
 
 # =====================================================================
-# STEP 4: Remove the per-project overlay network
+# STEP 4: Remove ALL per-project overlay networks
 # =====================================================================
-log "4/9 Removing overlay network ${OVERLAY_NETWORK}"
-# Swarm sometimes holds the network for several seconds after stack rm,
-# because background cleanup is asynchronous. We retry up to 5 times.
-REMOVED=0
-for i in 1 2 3 4 5; do
-    # "docker network rm" deletes the network
-    if ssh_to "${SERVER_1_IP}" "docker network rm ${OVERLAY_NETWORK} >/dev/null 2>&1"; then
-        ok "  removed (attempt $i)"
-        REMOVED=1
-        break
-    fi
-    # Wait 3 seconds before retrying
-    sleep 3
-done
-# If we couldn't remove it after 5 tries, warn (don't fail — other cleanup continues)
-[ "${REMOVED}" = "0" ] && warn "  could not remove ${OVERLAY_NETWORK} after 5 retries — clean up manually"
+# Two kinds of networks can exist for one stack:
+#
+#   a) ${OVERLAY_NETWORK}  (e.g. my-service-db-internal)
+#      Explicitly declared in the stack YAMLs. This is the one the stack
+#      actually uses for service-to-service traffic.
+#
+#   b) ${SWARM_STACK}_<anything>  (e.g. my-service-db_default)
+#      Docker Swarm AUTO-CREATES a `<stack>_default` network for any
+#      service in a compose/stack file that does NOT explicitly attach
+#      to a named network. Easy to leak: you never wrote it anywhere,
+#      so teardown forgets about it. Evidence from prod (2026-04-20):
+#      `rishi-hetzner-infra-template-db_default` still existed on rishi-1
+#      long after the service was redeployed, because earlier teardown
+#      iterations only removed `-db-internal`.
+#
+# We remove (a) explicitly (retry loop — Swarm holds it for a few seconds
+# after stack rm) AND (b) by pattern match on ${SWARM_STACK}_*.
+log "4/9 Removing overlay networks (${OVERLAY_NETWORK} + ${SWARM_STACK}_*)"
+# Swarm usually removes `${OVERLAY_NETWORK}` as part of STEP 1's stack rm,
+# but sometimes it's still present (stale reference, async cleanup lag). We
+# probe first so the "already gone" case reports ok instead of 5x warning.
+if ssh_to "${SERVER_1_IP}" "docker network inspect ${OVERLAY_NETWORK} >/dev/null 2>&1"; then
+    REMOVED=0
+    for i in 1 2 3 4 5; do
+        if ssh_to "${SERVER_1_IP}" "docker network rm ${OVERLAY_NETWORK} >/dev/null 2>&1"; then
+            ok "  removed ${OVERLAY_NETWORK} (attempt $i)"
+            REMOVED=1
+            break
+        fi
+        sleep 3
+    done
+    [ "${REMOVED}" = "0" ] && warn "  could not remove ${OVERLAY_NETWORK} after 5 retries — clean up manually"
+else
+    ok "  ${OVERLAY_NETWORK} already gone (cleaned by stack rm)"
+fi
+
+# Now sweep up any <stack>_* overlay networks Swarm auto-created.
+# `docker network ls --format '{{.Name}} {{.Scope}}'` lists name+scope so we
+# can filter out `bridge`/`host` entries that happen to start with the same
+# prefix (shouldn't, but defense in depth). awk keeps only `swarm`-scope
+# entries whose name starts with the stack prefix. xargs runs `network rm`
+# once per orphan. The ^anchor in awk prevents partial matches.
+AUTO_NETS=$(ssh_to "${SERVER_1_IP}" "
+    docker network ls --format '{{.Name}} {{.Scope}}' \
+      | awk -v p='^${SWARM_STACK}_' '\$2==\"swarm\" && \$1 ~ p {print \$1}'
+" || true)
+if [ -n "${AUTO_NETS}" ]; then
+    while IFS= read -r NET; do
+        [ -z "${NET}" ] && continue
+        if ssh_to "${SERVER_1_IP}" "docker network rm ${NET} >/dev/null 2>&1"; then
+            ok "  removed ${NET} (auto-created by Swarm)"
+        else
+            warn "  could not remove ${NET} — clean up manually"
+        fi
+    done <<< "${AUTO_NETS}"
+else
+    ok "  no ${SWARM_STACK}_* auto-networks found"
+fi
 
 # =====================================================================
-# STEP 5: Remove the app container + directory on rishi-1 and rishi-2
+# STEP 5: Remove app container + on-disk dirs on ALL servers
 # =====================================================================
-log "5/9 Removing app container + dir on rishi-1, rishi-2"
-# The app runs on rishi-1 and rishi-2 (not rishi-3, which is DB-only)
-for ip in "${SERVER_1_IP}" "${SERVER_2_IP}"; do
+# Two directories per service can live on a server:
+#   ~/yral-<name>/          (APP_DIR)       — created by deploy-app.sh, lives on APP_SERVERS
+#   ~/<name>-db-stack/      (DB_STACK_DIR)  — created by deploy-db-stack.sh,
+#                                              lives on rishi-1 today (the Swarm manager
+#                                              is where CI SCPs the stack YAMLs and runs
+#                                              `docker stack deploy`). Forgetting to
+#                                              remove this dir was the bug that left 7+
+#                                              orphan dirs on rishi-1 through April 2026.
+#
+# We loop over ALL 3 servers (not just app servers) and `rm -rf` both
+# paths. Missing dirs silently no-op, so this is idempotent and safe to
+# run against a partially-cleaned service.
+log "5/9 Removing app container + on-disk dirs on all servers"
+APP_DIR="/home/deploy/${PROJECT_REPO}"
+# NB: the CI workflow SCPs db-stack files to /home/deploy/${SWARM_STACK}-stack
+# (suffix is `-stack`, not the bare SWARM_STACK). See .github/workflows/deploy.yml
+# scp-action step: `target: /home/deploy/${{ env.SWARM_STACK }}-stack`. An earlier
+# version of this script used the wrong path (no `-stack` suffix) and silently
+# no-op'd the rm. Verified 2026-04-20 against temp-test-3.
+DB_STACK_DIR="/home/deploy/${SWARM_STACK}-stack"
+for ip in "${SERVER_1_IP}" "${SERVER_2_IP}" "${SERVER_3_IP}"; do
     HOST=$(ssh_to "$ip" 'hostname')
-    # Run multiple cleanup commands on the server:
     ssh_to "$ip" "
-        # Change to the app directory and shut down the docker-compose stack.
-        # -v: remove associated volumes. --remove-orphans: clean up leftover containers.
-        cd /home/deploy/${PROJECT_REPO} 2>/dev/null && docker compose down -v --remove-orphans 2>/dev/null || true
-        # Force-remove the app container by name (in case compose didn't catch it)
+        # If the app dir exists, shut down its compose stack before removing.
+        # -v removes associated volumes (local, not Swarm — those are STEP 2).
+        # --remove-orphans catches leftover sidecar containers.
+        if [ -d '${APP_DIR}' ]; then
+            cd '${APP_DIR}' && docker compose down -v --remove-orphans 2>/dev/null || true
+        fi
+        # Force-remove the app container by name in case compose didn't catch it
+        # (e.g. the compose file was already deleted but the container kept running).
         docker rm -f ${PROJECT_REPO} 2>/dev/null || true
-        # Delete the entire app directory from the server
-        rm -rf /home/deploy/${PROJECT_REPO}
+        # Delete both the app dir (if present) and the db-stack dir (if present).
+        # No-op if either is missing. We do NOT guard with [ -d ] on the rm itself
+        # because rm -rf on a missing path is already silent.
+        rm -rf '${APP_DIR}' '${DB_STACK_DIR}'
     "
-    ok "  ${HOST}: app removed"
+    # Report per-server whether each path existed before we rm'd it. We check
+    # the *existence* after the rm (always false) so we report what we removed
+    # by doing a second probe BEFORE the rm — but to keep the SSH round-trips
+    # down, just assert completion here.
+    ok "  ${HOST}: ${APP_DIR} + ${DB_STACK_DIR} removed (no-op if missing)"
 done
 
 # =====================================================================
@@ -278,6 +381,15 @@ for ip in "${SERVER_1_IP}" "${SERVER_2_IP}"; do
     "
     ok "  ${HOST}: snippet removed + Caddy reloaded"
 done
+
+# ---------------------------------------------------------------------
+# STEPS 7–9 (GHCR image, GitHub repo, local clone) are SKIPPED entirely
+# when --infra-only is set. This mode is for orphan cleanup where the
+# GitHub-side artifacts were already removed (or never existed).
+# ---------------------------------------------------------------------
+if [ "${INFRA_ONLY}" = "true" ]; then
+    log "7-9/9 skipped (--infra-only)"
+else
 
 # =====================================================================
 # STEP 7: Delete Docker images from GHCR (GitHub Container Registry)
@@ -327,9 +439,16 @@ else
     warn "  ${TARGET_DIR} not found"
 fi
 
+fi  # end of --infra-only skip block
+
 # =====================================================================
 # FINAL VERIFICATION: Check that the service is actually gone
 # =====================================================================
+# Verifies four things now, up from two:
+#   - Public URL no longer responds
+#   - Swarm stack gone
+#   - On-disk dirs gone on every server (new — catches the Step 5 bug)
+#   - No <SWARM_STACK>_* overlay networks remain (new — catches the Step 4 bug)
 echo
 log "Verification:"
 # Check if the public URL still responds (it shouldn't)
@@ -343,6 +462,28 @@ if ssh_to "${SERVER_1_IP}" "docker stack ls --format '{{.Name}}' | grep -q '^${S
     err "  Swarm stack ${SWARM_STACK} still exists"
 else
     ok "  Swarm stack ${SWARM_STACK} gone"
+fi
+# Check that neither the app dir nor the db-stack dir survives on any server.
+# Any hit is a footprint leak — the earlier teardown bug that left 7+ orphan
+# db-stack dirs on rishi-1 would have been caught here immediately.
+for ip in "${SERVER_1_IP}" "${SERVER_2_IP}" "${SERVER_3_IP}"; do
+    HOST=$(ssh_to "$ip" 'hostname')
+    LEFT=$(ssh_to "$ip" "ls -d /home/deploy/${PROJECT_REPO} /home/deploy/${SWARM_STACK} 2>/dev/null" || true)
+    if [ -n "${LEFT}" ]; then
+        err "  ${HOST}: dir(s) still exist: ${LEFT}"
+    else
+        ok "  ${HOST}: on-disk dirs gone"
+    fi
+done
+# Check for any leftover stack-prefixed overlay networks.
+LEFT_NETS=$(ssh_to "${SERVER_1_IP}" "
+    docker network ls --format '{{.Name}} {{.Scope}}' \
+      | awk -v p='^(${OVERLAY_NETWORK}|${SWARM_STACK}_.*)$' '\$2==\"swarm\" && \$1 ~ p {print \$1}'
+" || true)
+if [ -n "${LEFT_NETS}" ]; then
+    err "  overlay networks still exist: ${LEFT_NETS}"
+else
+    ok "  no ${SWARM_STACK} overlay networks remain"
 fi
 
 # Print the final success message

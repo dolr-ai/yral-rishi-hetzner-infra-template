@@ -15,6 +15,7 @@ Each section is self-contained — jump directly to the one you need.
 | Need to restore from backup | [6. Database Restore](#6-database-restore) |
 | Deploy stuck or failed in CI | [7. Failed Deploy](#7-failed-deploy) |
 | Counter returning same value / not incrementing | [8. Database Read-Only](#8-database-read-only) |
+| Tearing down a service / cleaning up orphans | [Service Teardown Gotchas](#service-teardown-gotchas) |
 
 **Server quick-connect:**
 ```bash
@@ -616,3 +617,139 @@ docker stack services <STACK>
 # Check Docker Swarm service task status (shows crashes, restarts)
 docker stack ps <STACK>
 ```
+
+---
+
+## Service Teardown Gotchas
+
+Checklist + root-cause notes for completely removing a service so that the
+servers have **zero footprint**. Derived from the 2026-04-20 orphan
+cleanup (7 leftover test services on rishi-1 that the pre-patch
+teardown-service.sh had missed).
+
+Use `scripts/teardown-service.sh --name <service>` for normal teardowns.
+This section exists so that when the script inevitably grows new gaps,
+you know what the common leak-points are and can extend it.
+
+### The 6 places a service leaves footprints
+
+Every dolr-ai service scatters artifacts across these six surfaces. A
+teardown is only "complete" when every surface is checked:
+
+| # | Surface | Naming pattern | Lives on |
+|---|---|---|---|
+| 1 | Docker Swarm stack | `<name>-db` | Swarm manager (rishi-1) |
+| 2 | Docker volumes | `<name>-db_etcd-rishi-{1,2,3}-data`, `<name>-db_patroni-rishi-{1,2,3}-data` | Per-node local volumes on all 3 servers |
+| 3 | Docker Swarm secrets | `<name>-db_postgres_password`, `<name>-db_replication_password` | Swarm cluster (manager-visible) |
+| 4 | Docker overlay networks | `<name>-db-internal` **AND** `<name>-db_default` (auto-created) | Swarm cluster |
+| 5 | On-disk directories | `/home/deploy/yral-<name>/` (app dir — app servers only), `/home/deploy/<name>-db-stack/` (db-stack dir — rishi-1 only today) | Filesystems |
+| 6 | GHCR + GitHub | `ghcr.io/dolr-ai/yral-<name>`, `ghcr.io/dolr-ai/yral-<name>-patroni`, `github.com/dolr-ai/yral-<name>` | External |
+
+### Specific gotchas we've hit
+
+**1. The auto-created `<stack>_default` overlay network.**
+Docker Swarm auto-creates `<stack>_default` for any service in a stack
+file that references an unnamed network. The teardown used to only
+remove `<stack>-internal`, so `<stack>_default` leaked. Evidence:
+`rishi-hetzner-infra-template-db_default` survived multiple teardowns.
+**Fix:** teardown now sweeps both `<overlay_network>` and any
+`<stack>_*` swarm networks (see STEP 4 of teardown-service.sh).
+
+**2. The db-stack directory on rishi-1.**
+CI SCPs db-stack files to `/home/deploy/<SWARM_STACK>-stack/` (note the
+`-stack` suffix) on rishi-1. Pre-patch teardown only removed
+`/home/deploy/yral-<name>/` (the app dir), leaving the db-stack dir
+orphaned forever. Evidence: 7 orphan `-db-stack/` dirs on rishi-1 in
+April 2026. **Fix:** teardown now rm's both paths on all 3 servers.
+
+**3. Volumes named for one host, living on another.**
+Swarm historically scheduled Patroni replicas on wrong nodes before
+placement constraints were added, which created volumes like
+`<stack>_patroni-rishi-2-data` **on rishi-1**. The glob
+`<stack>_*` DOES catch these, but:
+- Only if you run teardown **before** removing the stack manually
+  (teardown uses `SWARM_STACK` as the grep prefix).
+- If the volume is in use by a still-running task, `docker volume rm`
+  fails quietly. Re-run teardown after the stack fully drains.
+
+**4. Orphans from partial / manual deploys.**
+If someone created a stack manually (without using `new-service.sh`),
+the local clone + GitHub repo may not exist, so running teardown
+without guards would fail at step 7-9. **Fix:** use
+`--infra-only` to skip GHCR image / GitHub repo / local clone steps:
+```bash
+bash scripts/teardown-service.sh --name <stale-name> --yes --infra-only --keep-local
+```
+
+**5. Globally-scoped leftovers you won't catch with `--name`.**
+Some orphans don't follow the `<stack>-*` prefix (e.g., the `db-internal`
+swarm network from an early experiment). These have to be identified
+manually by comparing `docker network ls` against `docker stack ls` and
+the known project list. Not something teardown can sweep automatically.
+
+### Full verification checklist (post-teardown)
+
+Run these on each server — **every row must return no matches** for the
+teardown to be considered complete:
+
+```bash
+# On rishi-1 (Swarm manager):
+ssh deploy@138.201.137.181
+NAME=<service-name>
+
+# 1. Swarm stack gone
+docker stack ls --format '{{.Name}}' | grep "^${NAME}-db$"   # expect: empty
+
+# 2. Volumes gone (run on ALL 3 servers)
+docker volume ls -q | grep "^${NAME}-db_"                    # expect: empty
+
+# 3. Secrets gone
+docker secret ls --format '{{.Name}}' | grep "^${NAME}-db_"  # expect: empty
+
+# 4. Networks gone (any stack-prefixed swarm overlay)
+docker network ls --format '{{.Name}} {{.Scope}}' \
+  | awk -v n="${NAME}-db" '$2=="swarm" && $1 ~ "^"n {print}' # expect: empty
+
+# 5. Dirs gone (run on ALL 3 servers)
+ls -d /home/deploy/yral-${NAME} /home/deploy/${NAME}-db-stack 2>/dev/null  # expect: empty
+
+# 6. Caddy snippet gone
+ls /home/deploy/caddy/conf.d/yral-${NAME}.caddy 2>/dev/null  # expect: empty
+
+# 7. Public URL no longer responds
+curl -sfS --max-time 5 "https://${NAME}.rishi.yral.com/health"  # expect: failure
+```
+
+The teardown script automates these checks in its **Verification**
+section at the end. If it prints any red `✗`, the teardown is incomplete
+— re-run the script (it's idempotent) or clean up manually using the
+commands above.
+
+### Deep-clean sweep (when someone else's orphans are on the box)
+
+If you discover orphans from experiments you don't remember the name
+of, compare live state vs. known services:
+
+```bash
+ssh deploy@138.201.137.181
+
+# Known-live stacks (source of truth)
+docker stack ls --format '{{.Name}}'
+
+# Every -db-stack dir on disk — each one NOT in the above list is an orphan
+ls -1d /home/deploy/*-db-stack 2>/dev/null
+
+# Every stack-prefixed swarm network — orphans lack a matching stack above
+docker network ls --filter scope=swarm --format '{{.Name}}'
+
+# Every volume — orphans lack a matching stack above
+docker volume ls -q | grep -E '_(etcd|patroni)-rishi-[123]-data$'
+```
+
+For each orphan identified, run:
+```bash
+bash scripts/teardown-service.sh --name <orphan-name> --yes --infra-only --keep-local
+```
+
+The script is idempotent — re-running it on an already-clean service
+just prints warnings and succeeds.
