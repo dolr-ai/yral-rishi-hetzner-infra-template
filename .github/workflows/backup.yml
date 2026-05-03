@@ -45,7 +45,7 @@ jobs:
 
     steps:
       # Step 1: check out the repo (so we can read project.config + servers.config)
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       # Step 2: load project.config and servers.config into environment variables
       # "grep -v '^#'" removes comment lines

@@ -60,7 +60,7 @@ jobs:
       with_database: ${{ steps.flags.outputs.with_database }}
     steps:
       # Check out the repo so we can read project.config
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       # Read the WITH_DATABASE value from project.config
       - id: flags
         run: |
@@ -87,7 +87,7 @@ jobs:
       # Check out the FULL repo history (fetch-depth: 0 means all commits).
       # Gitleaks scans every commit, not just the latest one, so it catches
       # secrets that were committed and then "deleted" (still in git history).
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
       # Install and run gitleaks.
@@ -125,7 +125,7 @@ jobs:
     needs: config
     steps:
       # Check out the repo
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       # Install Python 3.12 (matches the version in our Dockerfile)
       - uses: actions/setup-python@v5
         with:
@@ -171,7 +171,7 @@ jobs:
     steps:
       # Check out the repo (needed to build Docker images from the Dockerfile)
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       # Load project.config variables into the job's environment.
       # After this step, we can use ${{ env.IMAGE_REPO }}, etc.
@@ -292,7 +292,7 @@ jobs:
 
     steps:
       # Check out the repo (need stack files and deploy scripts)
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       # Load both config files into the job's environment
       - name: Load project.config + servers.config into job env
@@ -412,7 +412,7 @@ jobs:
 
     steps:
       # Check out the repo (need compose file, Caddy template, deploy scripts)
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       # Load both config files into the job's environment
       - name: Load project.config + servers.config into job env

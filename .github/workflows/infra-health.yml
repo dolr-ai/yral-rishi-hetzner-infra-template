@@ -56,7 +56,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # ----- Step 1: Check out the repo so we can read project.config + servers.config -----
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       # ----- Step 2: Load configuration variables into the job's environment -----
       - name: Load config
