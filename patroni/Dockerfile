@@ -22,7 +22,7 @@
 # ---------------------------------------------------------------------------
 
 # Start from Ubuntu 22.04 (a stable, well-supported Linux distribution)
-FROM ubuntu:22.04
+FROM ubuntu:26.04
 
 # Image labels for provenance tracking
 LABEL org.opencontainers.image.source="https://github.com/dolr-ai/yral-rishi-hetzner-infra-template"
